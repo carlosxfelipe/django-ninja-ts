@@ -33,7 +33,7 @@ The server will start at `http://localhost:8000`:
 - **Scalar API Docs**: [http://localhost:8000/api/docs](http://localhost:8000/api/docs)
 - **OpenAPI 3.x Spec**: [http://localhost:8000/api/openapi.json](http://localhost:8000/api/openapi.json)
 - **TypeScript Client SDK**: [http://localhost:8000/api/sdk.ts](http://localhost:8000/api/sdk.ts) (active in `DEBUG=True`)
-- **TypeScript Type Definitions**: [http://localhost:8000/api/types.d.ts](http://localhost:8000/api/types.d.ts)
+- **TypeScript Type Definitions**: [http://localhost:8000/api/types.d.ts](http://localhost:8000/api/types.d.ts) (active in `DEBUG=True`)
 
 ### 3. Generate the SDK offline (CI/CD)
 
