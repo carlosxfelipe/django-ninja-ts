@@ -1,0 +1,35 @@
+[project]
+name = "django-ninja-ts"
+version = "0.1.0"
+description = "Generate a zero-dependency, end-to-end type-safe TypeScript SDK from your Django Ninja API."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Carlos Felipe Araujo" }]
+requires-python = ">=3.10"
+keywords = ["django", "django-ninja", "typescript", "sdk", "openapi", "codegen"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Code Generators",
+    "Typing :: Typed",
+]
+dependencies = [
+    "django>=4.2",
+    "django-ninja>=1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ninja_ts"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

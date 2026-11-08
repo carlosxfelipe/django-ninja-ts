@@ -1,7 +1,8 @@
 [project]
-name = "django-ninja-ts"
+# Example Django project used to develop and showcase the package in packages/django-ninja-ts.
+name = "django-ninja-ts-example"
 version = "0.1.0"
-description = "Add your description here"
+description = "Example Django Ninja API (mirrors gota/examples) consuming django-ninja-ts"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -9,6 +10,7 @@ dependencies = [
     "django-cors-headers>=4.9.0",
     "django-ninja>=1.8.0",
     "django-ninja-jwt>=5.4.5",
+    "django-ninja-ts",
     "email-validator>=2.3.0",
     "scalar-ninja>=0.3.1",
 ]
@@ -16,8 +18,15 @@ dependencies = [
 [dependency-groups]
 dev = [
     "django-stubs>=6.1.2",
+    "pytest>=8.0",
     "ruff>=0.17.4",
 ]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+django-ninja-ts = { workspace = true }
 
 # The editor's static analysis doesn't run settings.py, so it can't see
 # sys.path.insert(0, BASE_DIR / "apps"). Tell it where apps live.

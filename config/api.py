@@ -1,5 +1,6 @@
 from typing import Any, ClassVar
 
+import ninja_ts
 from core.api import router as core_router
 from ninja_extra import NinjaExtraAPI
 from ninja_extra.controllers.base import ControllerBoundRouter
@@ -38,3 +39,7 @@ def health_check(request):
 # Register modular routers
 api.add_router("/core", core_router)
 api.add_router("/todos", todos_router)
+
+# Serve /api/sdk.ts and /api/types.d.ts (hidden from OpenAPI; only when DEBUG=True).
+# In production, export at build time: `python manage.py generate_ts_sdk -o <file>`.
+ninja_ts.install(api)

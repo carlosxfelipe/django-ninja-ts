@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "ninja_extra",
     "ninja_jwt",
     "ninja_jwt.token_blacklist",
+    "ninja_ts",
     "core",
     "todos",
     "django.contrib.admin",
@@ -149,3 +150,6 @@ NINJA_JWT = {
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
 }
+
+# TypeScript SDK (django-ninja-ts): `python manage.py generate_ts_sdk -o frontend/src/api.ts`
+NINJA_TS_API = "config.api.api"
