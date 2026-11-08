@@ -1,7 +1,19 @@
+from typing import Any, ClassVar
+
 from core.api import router as core_router
 from ninja_extra import NinjaExtraAPI
+from ninja_extra.controllers.base import ControllerBoundRouter
 from ninja_jwt.controller import NinjaJWTDefaultController
 from scalar_ninja import ScalarConfig, ScalarViewer
+from todos.api import router as todos_router
+
+# Compatibility patch: django-ninja 1.8.0 expects .template on all bound routers for webhooks
+if not hasattr(ControllerBoundRouter, "template"):
+
+    class _EmptyTemplate:
+        webhooks: ClassVar[dict[str, Any]] = {}
+
+    ControllerBoundRouter.template = property(lambda self: _EmptyTemplate())
 
 api = NinjaExtraAPI(
     title="Ninja API",
@@ -25,3 +37,4 @@ def health_check(request):
 
 # Register modular routers
 api.add_router("/core", core_router)
+api.add_router("/todos", todos_router)

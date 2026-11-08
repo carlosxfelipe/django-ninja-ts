@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "ninja_jwt",
     "ninja_jwt.token_blacklist",
     "core",
+    "todos",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
