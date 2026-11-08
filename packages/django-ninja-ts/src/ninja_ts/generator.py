@@ -581,7 +581,7 @@ class TypeScriptGenerator:
             version = f" ({info['version']})" if info.get("version") else ""
             lines.append(f"API: {info['title']}{version}")
         lines += _doc_lines(info.get("description"))
-        return "/* eslint-disable */\n" + _jsdoc(lines, "")
+        return _jsdoc(lines, "")
 
 
 def generate_types(openapi: dict[str, Any], **options: Any) -> str:
