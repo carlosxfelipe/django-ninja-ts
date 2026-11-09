@@ -323,6 +323,14 @@ def test_retry_config_types_and_runtime(types, sdk):
     assert "retry?: number | NinjaRetryConfig;" in types
     assert "retryOpt = options.retry ?? clientOptions.retry" in sdk
     assert 'res.headers.get("Retry-After")' in sdk
+    assert "Math.random()" in sdk
+    assert "Date.parse(retryAfter)" in sdk
+
+
+def test_query_param_serialization_and_return_cast(sdk):
+    assert "function appendQueryParam(search: URLSearchParams" in sdk
+    assert "appendQueryParam(search, key, value);" in sdk
+    assert "as Promise<ResponseData<any>>;" in sdk
 
 
 def test_audit_schemas_detects_sensitive_response_fields():

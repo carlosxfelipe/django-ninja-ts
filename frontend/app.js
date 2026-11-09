@@ -53,6 +53,25 @@ function combineSignals(signalA, signalB) {
 }
 
 /**
+ * Appends a query parameter value to URLSearchParams.
+ * @param {URLSearchParams} search
+ * @param {string} key
+ * @param {unknown} value
+ */
+function appendQueryParam(search, key, value) {
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) appendQueryParam(search, key, item);
+  } else if (value instanceof Date) {
+    search.append(key, value.toISOString());
+  } else if (typeof value === "object") {
+    search.append(key, JSON.stringify(value));
+  } else {
+    search.append(key, String(value));
+  }
+}
+
+/**
  * Runtime implementation of createNinjaClient() matching packages/django-ninja-ts
  * @param {string} [baseUrl=""]
  * @param {import("../sdk/api").NinjaClientOptions} [clientOptions={}]
@@ -111,9 +130,7 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
       if (options.query) {
         const q = new URLSearchParams();
         for (const [k, v] of Object.entries(options.query)) {
-          if (v !== undefined && v !== null) {
-            q.set(k, String(v));
-          }
+          appendQueryParam(q, k, v);
         }
         const qs = q.toString();
         if (qs) url += (url.includes("?") ? "&" : "?") + qs;
@@ -207,11 +224,19 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
             (!init.signal || !init.signal.aborted)
           ) {
             attempt++;
-            let delay = baseDelay * Math.pow(2, attempt - 1);
+            let delay =
+              baseDelay *
+              Math.pow(2, attempt - 1) *
+              (0.5 + Math.random() * 0.5);
             const retryAfter = res.headers.get("Retry-After");
             if (retryAfter) {
               const seconds = parseInt(retryAfter, 10);
-              if (!isNaN(seconds)) delay = seconds * 1000;
+              if (!isNaN(seconds)) {
+                delay = seconds * 1000;
+              } else {
+                const dateMs = Date.parse(retryAfter);
+                if (!isNaN(dateMs)) delay = Math.max(0, dateMs - Date.now());
+              }
             }
             await new Promise((resolve) => setTimeout(resolve, delay));
             continue;
@@ -223,7 +248,10 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
             (!init.signal || !init.signal.aborted)
           ) {
             attempt++;
-            const delay = baseDelay * Math.pow(2, attempt - 1);
+            const delay =
+              baseDelay *
+              Math.pow(2, attempt - 1) *
+              (0.5 + Math.random() * 0.5);
             await new Promise((resolve) => setTimeout(resolve, delay));
             continue;
           }

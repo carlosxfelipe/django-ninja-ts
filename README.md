@@ -79,7 +79,7 @@ uv run ruff format --check
 Build the distribution packages (`.whl` and `.tar.gz`):
 
 ```bash
-uv build packages/django-ninja-ts
+uv build --package django-ninja-ts
 ```
 
 ## 📄 License

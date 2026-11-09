@@ -5,7 +5,7 @@ Generate a **zero-dependency, end-to-end type-safe TypeScript SDK** from your
 
 - Pydantic schemas → TypeScript interfaces (with JSDoc from `description`, `examples`, `default`).
 - `Literal[...]` / enums → string literal unions; `Optional[T]` → `T | null`.
-- Every route → a typed entry in `NinjaEndpoints` (`params`, `query`, `body`, `response`).
+- Every route → a typed entry in `NinjaEndpoints` (`params`, `query`, `body`, `response`, `error`).
 - `createNinjaClient()` runtime built on native `fetch` (browser, Node 18+, Deno, Bun).
 - Works with `django-ninja-extra` controllers (e.g. `django-ninja-jwt`).
 

@@ -131,6 +131,19 @@ interface RawRequestOptions extends BaseRequestOptions {
   body?: unknown;
 }
 
+function appendQueryParam(search: URLSearchParams, key: string, value: unknown): void {
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) appendQueryParam(search, key, item);
+  } else if (value instanceof Date) {
+    search.append(key, value.toISOString());
+  } else if (typeof value === "object") {
+    search.append(key, JSON.stringify(value));
+  } else {
+    search.append(key, String(value));
+  }
+}
+
 function collectEntries(key: string, value: unknown, out: FormEntry[]): void {
   if (value === undefined || value === null) return;
   if (Array.isArray(value)) {
@@ -267,8 +280,8 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     let url = root + path;
     if (options.query) {
       const search = new URLSearchParams();
-      for (const [key, value] of toEntries(options.query)) {
-        if (typeof value === "string") search.append(key, value);
+      for (const [key, value] of Object.entries(options.query)) {
+        appendQueryParam(search, key, value);
       }
       const qs = search.toString();
       if (qs) url += (url.includes("?") ? "&" : "?") + qs;
@@ -365,11 +378,16 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
           (!init.signal || !init.signal.aborted)
         ) {
           attempt++;
-          let delay = baseDelay * Math.pow(2, attempt - 1);
+          let delay = baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
           const retryAfter = res.headers.get("Retry-After");
           if (retryAfter) {
             const seconds = parseInt(retryAfter, 10);
-            if (!isNaN(seconds)) delay = seconds * 1000;
+            if (!isNaN(seconds)) {
+              delay = seconds * 1000;
+            } else {
+              const dateMs = Date.parse(retryAfter);
+              if (!isNaN(dateMs)) delay = Math.max(0, dateMs - Date.now());
+            }
           }
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
@@ -381,7 +399,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
           (!init.signal || !init.signal.aborted)
         ) {
           attempt++;
-          const delay = baseDelay * Math.pow(2, attempt - 1);
+          const delay = baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
@@ -422,7 +440,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     baseUrl: root,
     fetch(endpoint, ...args) {
       const [options] = args as unknown as [RawRequestOptions?];
-      return request(String(endpoint), options ?? {}) as Promise<never>;
+      return request(String(endpoint), options ?? {}) as Promise<ResponseData<any>>;
     },
   };
 }
