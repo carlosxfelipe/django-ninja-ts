@@ -9,7 +9,7 @@ from django.core.management import call_command
 from django.test import Client
 from ninja_ts import TypeScriptGenerator
 
-from tests.sample_api import api
+from .sample_api import api
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +53,7 @@ def test_jsdoc_from_field_metadata(types):
 def test_response_exclusions_disable_all_fields_present():
     from ninja import NinjaAPI
 
-    from tests.sample_api import TodoOut
+    from .sample_api import TodoOut
 
     local = NinjaAPI(urls_namespace="exclusions")
 
@@ -79,12 +79,55 @@ def test_path_params_and_response(types):
     block = endpoint_block(types, "GET /api/todos/{id}")
     assert "params: { id: string };" in block
     assert "response: TodoOut;" in block
+    assert "error: unknown;" in block
+
+
+def test_endpoint_with_explicit_error_schemas(types):
+    block = endpoint_block(types, "GET /api/todos/{id}/strict")
+    assert "params: { id: string };" in block
+    assert "response: TodoOut;" in block
+    assert "error: ErrorDetail | Message;" in block
+    assert (
+        'export type ResponseError<K extends EndpointKey> = NinjaEndpoints[K]["error"];'
+        in types
+    )
+
+
+def test_nextjs_caching_and_duplex_types(types, sdk):
+    assert "export interface NextFetchRequestConfig {" in types
+    assert "revalidate?: number | false;" in types
+    assert "tags?: string[];" in types
+    assert "next?: NextFetchRequestConfig;" in types
+    assert 'duplex?: "half";' in types
+    assert 'options.duplex ?? (isReadableStream(init.body) ? "half" : undefined)' in sdk
+    assert '(init as Record<string, unknown>)["duplex"] = duplex;' in sdk
 
 
 def test_path_param_types_come_from_annotations(types):
     block = endpoint_block(types, "DELETE /api/todos/{id}")
     assert "params: { id: number };" in block
     assert "response: void;" in block  # 204
+
+
+def test_wildcard_catch_all_path_param(types):
+    block = endpoint_block(types, "GET /api/todos/files/{filepath}")
+    assert "params: { filepath: string | string[] };" in block
+    assert "response: Message;" in block
+
+
+def test_client_lifecycle_hooks(types, sdk):
+    assert (
+        "onRequest?: (endpoint: string, init: RequestInit) => Promise<void> | void;"
+        in types
+    )
+    assert "onResponse?: (response: Response) => Promise<void> | void;" in types
+    assert "onError?: (error: NinjaApiError | Error) => Promise<void> | void;" in types
+    assert "if (clientOptions.onRequest) {" in sdk
+    assert "await clientOptions.onRequest(endpoint, init);" in sdk
+    assert "if (clientOptions.onResponse) {" in sdk
+    assert "await clientOptions.onResponse(response);" in sdk
+    assert "if (clientOptions.onError) {" in sdk
+    assert "await clientOptions.onError(apiError);" in sdk
 
 
 def test_deprecated_and_summary_jsdoc(types):
@@ -240,6 +283,38 @@ def test_install_serves_sdk_and_types():
     assert b"export declare function createNinjaClient(" in types_response.content
 
 
+def test_create_sdk_and_types_views():
+    from django.http import Http404
+    from django.test import RequestFactory
+    from ninja_ts import create_sdk_view, create_types_view
+
+    factory = RequestFactory()
+    sdk_view = create_sdk_view(api, enabled=True)
+    req = factory.get("/custom-sdk.ts")
+    resp = sdk_view(req)
+    assert resp.status_code == 200
+    assert resp["Cache-Control"].startswith("no-store")
+    assert b"export function createNinjaClient(" in resp.content
+
+    types_view = create_types_view(api, enabled=True)
+    req = factory.get("/custom-types.d.ts")
+    resp = types_view(req)
+    assert resp.status_code == 200
+    assert b"export declare function createNinjaClient(" in resp.content
+
+    disabled_view = create_sdk_view(api, enabled=False)
+    with pytest.raises(Http404):
+        disabled_view(req)
+
+
+def test_ninja_api_error_headers_and_timeout_types(types, sdk):
+    assert "readonly headers: Headers;" in types
+    assert "this.headers = response.headers;" in sdk
+    assert "timeoutMs?: number;" in types
+    assert "createTimeoutSignal(timeoutMs)" in sdk
+    assert "combineSignals(options.signal, timeoutSignal)" in sdk
+
+
 def test_management_command_writes_files(tmp_path: Path):
     sdk_path = tmp_path / "nested" / "api.ts"
     call_command("generate_ts_sdk", out=str(sdk_path))
@@ -254,12 +329,36 @@ def test_management_command_writes_files(tmp_path: Path):
 
 
 CONSUMER = """
-import { createNinjaClient, NinjaApiError, type ResponseData } from "./api";
+import {
+  createNinjaClient,
+  NinjaApiError,
+  type ResponseData,
+  type ResponseError,
+  type NextFetchRequestConfig,
+} from "./api";
 
-const api = createNinjaClient("http://localhost:8000", { headers: async () => ({ Authorization: "Bearer x" }) });
+const nextConfig: NextFetchRequestConfig = { revalidate: 60, tags: ["global"] };
+const api = createNinjaClient("http://localhost:8000", {
+  headers: async () => ({ Authorization: "Bearer x" }),
+  next: nextConfig,
+  timeoutMs: 5000,
+  onRequest(endpoint, init) {
+    init.headers = new Headers(init.headers);
+    (init.headers as Headers).set("X-Client-Hook", "active");
+  },
+  onResponse(res) {
+    if (!res.ok) console.warn("Request failed with status", res.status);
+  },
+  onError(err) {
+    console.error("Client hook error:", err.message);
+  },
+});
 
 async function main(): Promise<void> {
-  const list: ResponseData<"GET /api/todos"> = await api.fetch("GET /api/todos");
+  const list: ResponseData<"GET /api/todos"> = await api.fetch("GET /api/todos", {
+    next: { revalidate: 30, tags: ["todos"] },
+    timeoutMs: 2000,
+  });
   const filtered = await api.fetch("GET /api/todos", { query: { limit: 5 } });
   const one = await api.fetch("GET /api/todos/{id}", { params: { id: "todo_1" } });
   const done: boolean = one.done;
@@ -268,7 +367,20 @@ async function main(): Promise<void> {
   await api.fetch("POST /api/todos/{id}/attachments", {
     params: { id: "todo_1" },
     body: { file: new Blob(["x"]), caption: "c" },
+    duplex: "half",
   });
+
+  // Wildcard / catch-all path params as string and string[]
+  const file1 = await api.fetch("GET /api/todos/files/{filepath}", {
+    params: { filepath: "docs/readme.md" },
+  });
+  const file2 = await api.fetch("GET /api/todos/files/{filepath}", {
+    params: { filepath: ["nested", "deep", "file.txt"] },
+  });
+
+  // Strict route error response typing
+  type StrictError = ResponseError<"GET /api/todos/{id}/strict">;
+  type DefaultError = ResponseError<"GET /api/todos">;
 
   // @ts-expect-error path params are required
   await api.fetch("GET /api/todos/{id}");
@@ -282,30 +394,33 @@ async function main(): Promise<void> {
   await api.fetch("GET /api/health", { body: { x: 1 } });
 
   try {
-    await api.fetch("GET /api/health");
+    await api.fetch("GET /api/todos/{id}/strict", { params: { id: "todo_1" } });
   } catch (err) {
-    if (err instanceof NinjaApiError) console.log(err.status, err.data);
+    if (err instanceof NinjaApiError) {
+      const errData = err.data as StrictError;
+      const contentType: string | null = err.headers.get("content-type");
+      console.log(err.status, errData, contentType);
+    }
   }
-  console.log(list, filtered, done, created, removed);
+  console.log(list, filtered, done, created, removed, file1, file2);
 }
 
 void main();
 """
 
 
-TSC_CMD = (
-    [shutil.which("tsc")]
-    if shutil.which("tsc")
-    else (
-        [shutil.which("npx"), "--yes", "-p", "typescript", "tsc"]
-        if shutil.which("npx")
-        else None
-    )
+tsc_path = shutil.which("tsc")
+npx_path = shutil.which("npx")
+TSC_CMD: list[str] | None = (
+    [tsc_path]
+    if tsc_path
+    else ([npx_path, "--yes", "-p", "typescript", "tsc"] if npx_path else None)
 )
 
 
 @pytest.mark.skipif(not TSC_CMD, reason="TypeScript compiler (tsc/npx) not on PATH")
 def test_generated_code_type_checks_with_tsc(tmp_path: Path, sdk: str, types: str):
+    assert TSC_CMD is not None
     (tmp_path / "api.ts").write_text(sdk)
     (tmp_path / "consumer.ts").write_text(CONSUMER)
     flags = [

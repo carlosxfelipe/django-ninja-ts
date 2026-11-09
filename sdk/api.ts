@@ -53,6 +53,7 @@ export interface NinjaEndpoints {
     query: void;
     body: void;
     response: TodoOut[];
+    error: unknown;
     request: { params?: never; query?: never; body?: never };
   };
   /**
@@ -66,6 +67,7 @@ export interface NinjaEndpoints {
     query: void;
     body: void;
     response: TodoOut;
+    error: unknown;
     request: { params: { id: string }; query?: never; body?: never };
   };
   /**
@@ -79,6 +81,7 @@ export interface NinjaEndpoints {
     query: void;
     body: TodoIn;
     response: TodoOut;
+    error: unknown;
     request: { params?: never; query?: never; body: TodoIn };
   };
 }
@@ -89,12 +92,21 @@ export type RequestParams<K extends EndpointKey> = NinjaEndpoints[K]["params"];
 export type RequestQuery<K extends EndpointKey> = NinjaEndpoints[K]["query"];
 export type RequestBody<K extends EndpointKey> = NinjaEndpoints[K]["body"];
 export type ResponseData<K extends EndpointKey> = NinjaEndpoints[K]["response"];
+export type ResponseError<K extends EndpointKey> = NinjaEndpoints[K]["error"];
+
+export interface NextFetchRequestConfig {
+  revalidate?: number | false;
+  tags?: string[];
+}
 
 export interface BaseRequestOptions {
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
   signal?: AbortSignal;
   cache?: RequestCache;
+  next?: NextFetchRequestConfig;
+  duplex?: "half";
+  timeoutMs?: number;
 }
 
 export type RequestOptions<K extends EndpointKey> = NinjaEndpoints[K]["request"] & BaseRequestOptions;
@@ -107,6 +119,16 @@ export interface NinjaClientOptions {
   credentials?: RequestCredentials;
   /** Custom fetch implementation (defaults to the global fetch). */
   fetch?: typeof fetch;
+  /** Default Next.js App Router cache configuration (revalidate / tags). */
+  next?: NextFetchRequestConfig;
+  /** Default request timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Hook invoked before each request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
+  onRequest?: (endpoint: string, init: RequestInit) => Promise<void> | void;
+  /** Hook invoked after a response is received, before error handling or body parsing. */
+  onResponse?: (response: Response) => Promise<void> | void;
+  /** Hook invoked when an error occurs (network failure or non-2xx HTTP response). */
+  onError?: (error: NinjaApiError | Error) => Promise<void> | void;
 }
 
 export interface NinjaClient {
@@ -125,6 +147,7 @@ export class NinjaApiError<T = unknown> extends Error {
   readonly status: number;
   readonly data: T;
   readonly response: Response;
+  readonly headers: Headers;
 
   constructor(response: Response, data: T, message?: string) {
     super(message ?? `Request failed with status ${response.status}`);
@@ -132,6 +155,7 @@ export class NinjaApiError<T = unknown> extends Error {
     this.status = response.status;
     this.data = data;
     this.response = response;
+    this.headers = response.headers;
   }
 }
 
@@ -166,15 +190,63 @@ function toEntries(source: unknown): FormEntry[] {
   return out;
 }
 
+function isReadableStream(value: unknown): value is ReadableStream {
+  return (
+    (typeof ReadableStream !== "undefined" && value instanceof ReadableStream) ||
+    (value !== null && typeof value === "object" && typeof (value as { getReader?: unknown }).getReader === "function")
+  );
+}
+
 function isBodyInit(body: unknown): body is BodyInit {
   return (
     (typeof FormData !== "undefined" && body instanceof FormData) ||
     (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
     (typeof Blob !== "undefined" && body instanceof Blob) ||
-    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) ||
+    isReadableStream(body) ||
     body instanceof ArrayBuffer ||
     ArrayBuffer.isView(body)
   );
+}
+
+function createTimeoutSignal(timeoutMs?: number): AbortSignal | undefined {
+  if (timeoutMs === undefined || timeoutMs <= 0) return undefined;
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+  if (typeof AbortController === "undefined") return undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (
+    typeof timer === "object" &&
+    timer &&
+    "unref" in timer &&
+    typeof (timer as { unref: () => void }).unref === "function"
+  ) {
+    (timer as { unref: () => void }).unref();
+  }
+  return controller.signal;
+}
+
+function combineSignals(signalA?: AbortSignal, signalB?: AbortSignal): AbortSignal | undefined {
+  if (!signalA) return signalB;
+  if (!signalB) return signalA;
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+    return AbortSignal.any([signalA, signalB]);
+  }
+  if (typeof AbortController === "undefined") return signalA;
+  const controller = new AbortController();
+  const onAbort = () => {
+    controller.abort();
+    signalA.removeEventListener("abort", onAbort);
+    signalB.removeEventListener("abort", onAbort);
+  };
+  if (signalA.aborted || signalB.aborted) {
+    controller.abort();
+  } else {
+    signalA.addEventListener("abort", onAbort, { once: true });
+    signalB.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
 }
 
 function errorMessage(data: unknown, fallback: string): string {
@@ -211,12 +283,21 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     const separator = endpoint.indexOf(" ");
     const method = endpoint.slice(0, separator);
     const params = options.params ?? {};
-    const path = endpoint.slice(separator + 1).replace(/\{([^}]+)\}/g, (_match, name: string) => {
-      const value = params[name];
+    const path = endpoint.slice(separator + 1).replace(/\{([^}]+)\}/g, (_match, rawName: string) => {
+      const isCatchAll = rawName.startsWith("+") || rawName.endsWith("*");
+      const name = rawName.replace(/^\+/, "").replace(/\*$/, "");
+      const value = params[name] ?? (name !== rawName ? params[rawName] : undefined);
       if (value === undefined || value === null) {
         throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
       }
-      return encodeURIComponent(String(value));
+      if (Array.isArray(value)) {
+        return value.map((seg) => encodeURIComponent(String(seg))).join("/");
+      }
+      const str = String(value);
+      if (isCatchAll || str.includes("/")) {
+        return str.split("/").map((seg) => encodeURIComponent(seg)).join("/");
+      }
+      return encodeURIComponent(str);
     });
 
     let url = root + path;
@@ -260,15 +341,60 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     }
     const credentials = options.credentials ?? clientOptions.credentials;
     if (credentials) init.credentials = credentials;
-    if (options.signal) init.signal = options.signal;
+
+    const timeoutMs = options.timeoutMs ?? clientOptions.timeoutMs;
+    const timeoutSignal = createTimeoutSignal(timeoutMs);
+    const signal = combineSignals(options.signal, timeoutSignal);
+    if (signal) init.signal = signal;
+
     if (options.cache) init.cache = options.cache;
 
+    const nextConfig =
+      clientOptions.next || options.next
+        ? { ...clientOptions.next, ...options.next }
+        : undefined;
+    if (nextConfig) {
+      (init as Record<string, unknown>)["next"] = nextConfig;
+    }
+
+    const duplex =
+      options.duplex ?? (isReadableStream(init.body) ? "half" : undefined);
+    if (duplex) {
+      (init as Record<string, unknown>)["duplex"] = duplex;
+    }
+
+    if (clientOptions.onRequest) {
+      await clientOptions.onRequest(endpoint, init);
+    }
+
     const fetchFn = clientOptions.fetch ?? globalThis.fetch.bind(globalThis);
-    const response = await fetchFn(url, init);
+    let response: Response;
+    try {
+      response = await fetchFn(url, init);
+    } catch (networkError) {
+      if (clientOptions.onError) {
+        await clientOptions.onError(
+          networkError instanceof Error ? networkError : new Error(String(networkError))
+        );
+      }
+      throw networkError;
+    }
+
+    if (clientOptions.onResponse) {
+      await clientOptions.onResponse(response);
+    }
 
     if (!response.ok) {
       const data = await readBody(response).catch(() => undefined);
-      throw new NinjaApiError(response, data, errorMessage(data, response.statusText || `HTTP ${response.status}`));
+      const apiError = new NinjaApiError(
+        response,
+        data,
+        errorMessage(data, response.statusText || `HTTP ${response.status}`)
+      );
+      if (clientOptions.onError) {
+        await clientOptions.onError(apiError);
+      }
+      throw apiError;
     }
     if (response.status === 204 || response.status === 205 || response.headers.get("content-length") === "0") {
       return undefined;

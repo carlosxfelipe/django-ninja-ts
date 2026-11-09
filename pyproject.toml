@@ -31,10 +31,10 @@ django-ninja-ts = { workspace = true }
 # The editor's static analysis doesn't run settings.py, so it can't see
 # sys.path.insert(0, BASE_DIR / "apps"). Tell it where apps live.
 [tool.pyrefly]
-search-path = ["apps"]
+search-path = ["apps", "packages/django-ninja-ts"]
 
 [tool.pyright]
-extraPaths = ["apps"]
+extraPaths = ["apps", "packages/django-ninja-ts"]
 
 [tool.ty.environment]
-extra-paths = ["apps"]
+extra-paths = ["apps", "packages/django-ninja-ts"]

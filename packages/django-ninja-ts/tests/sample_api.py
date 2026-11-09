@@ -34,6 +34,11 @@ class Message(Schema):
     message: str
 
 
+class ErrorDetail(Schema):
+    code: str
+    message: str
+
+
 router = Router(tags=["Todos"])
 
 
@@ -47,9 +52,23 @@ def get_todo(request, id: str):
     return {"id": id, "title": "x", "priority": "low"}
 
 
+@router.get(
+    "/{id}/strict",
+    response={200: TodoOut, 404: ErrorDetail, 422: Message},
+    summary="Get todo with explicit errors",
+)
+def get_todo_strict(request, id: str):
+    return {"id": id, "title": "x", "priority": "low"}
+
+
 @router.post("", response={201: TodoOut}, summary="Create a new todo")
 def create_todo(request, payload: TodoIn):
     return 201, {"id": "todo_1", **payload.dict()}
+
+
+@router.get("/files/{path:filepath}", response=Message, summary="Get file by path")
+def get_file(request, filepath: str):
+    return {"message": filepath}
 
 
 @router.delete("/{id}", response={204: None}, summary="Delete todo", deprecated=True)

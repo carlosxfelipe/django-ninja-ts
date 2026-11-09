@@ -73,6 +73,7 @@ class _Route:
     query_ts: str
     body_ts: str
     response_ts: str
+    error_ts: str
     request_ts: str
     body_encoding: str
 
@@ -422,8 +423,40 @@ class TypeScriptGenerator:
                     (f"{_prop_name(name)}{'' if required else '?'}: string", required)
                 )
 
-        for name in _PATH_PARAM.findall(path):
-            path_fields.setdefault(name, f"{_prop_name(name)}: string")
+        for raw_name in _PATH_PARAM.findall(path):
+            clean_name = raw_name
+            is_catch_all = False
+            if raw_name.startswith("path:"):
+                clean_name = raw_name[5:]
+                is_catch_all = True
+            elif raw_name.endswith(":path"):
+                clean_name = raw_name[:-5]
+                is_catch_all = True
+            elif raw_name.startswith("+") or raw_name.endswith("*"):
+                clean_name = raw_name.lstrip("+").rstrip("*")
+                is_catch_all = True
+            elif clean_name.lower() in (
+                "path",
+                "filepath",
+                "file_path",
+            ) or clean_name.lower().endswith(("_path", "filepath")):
+                is_catch_all = True
+
+            target_ts = "string | string[]" if is_catch_all else "string"
+
+            if clean_name in path_fields:
+                if is_catch_all and path_fields[clean_name].endswith(": string"):
+                    path_fields[clean_name] = f"{_prop_name(clean_name)}: {target_ts}"
+            elif raw_name in path_fields:
+                val = path_fields.pop(raw_name)
+                ts = (
+                    target_ts
+                    if (is_catch_all and val.endswith(": string"))
+                    else val.split(": ", 1)[1]
+                )
+                path_fields[clean_name] = f"{_prop_name(clean_name)}: {ts}"
+            else:
+                path_fields[clean_name] = f"{_prop_name(clean_name)}: {target_ts}"
 
         params_ts = (
             "{ " + "; ".join(sorted(path_fields.values())) + " }"
@@ -443,6 +476,7 @@ class TypeScriptGenerator:
 
         body_ts, body_required, body_encoding = self._request_body(op)
         response_ts = self._response(op)
+        error_ts = self._error_response(op)
 
         request = []
         request.append(f"params: {params_ts}" if path_fields else "params?: never")
@@ -473,6 +507,7 @@ class TypeScriptGenerator:
             query_ts=query_ts,
             body_ts=body_ts,
             response_ts=response_ts,
+            error_ts=error_ts,
             request_ts="{ " + "; ".join(request) + " }",
             body_encoding=body_encoding,
         )
@@ -501,6 +536,21 @@ class TypeScriptGenerator:
                 return self._ts((media or {}).get("schema")), required, "json"
         return "Blob | ArrayBuffer | string", required, "raw"
 
+    def _content_ts(self, response: Any, *, response_schema: bool = True) -> str:
+        if not isinstance(response, dict):
+            return "unknown"
+        content = response.get("content") if isinstance(response, dict) else None
+        if not isinstance(content, dict) or not content:
+            return "unknown"
+        for media_type, media in content.items():
+            if media_type == "application/json" or media_type.endswith("+json"):
+                return self._ts((media or {}).get("schema"), response=response_schema)
+        if "text/event-stream" in content:
+            return "ReadableStream<string>"
+        if any(mt.startswith("text/") for mt in content):
+            return "string"
+        return "Blob"
+
     def _response(self, op: dict[str, Any]) -> str:
         # Keys may be ints (raw Ninja schema) or strings (JSON-loaded schema).
         responses = {str(k): v for k, v in (op.get("responses") or {}).items()}
@@ -515,17 +565,22 @@ class TypeScriptGenerator:
 
         if code in (204, 205):
             return "void"
-        content = response.get("content") if isinstance(response, dict) else None
-        if not content:
-            return "unknown"
-        for media_type, media in content.items():
-            if media_type == "application/json" or media_type.endswith("+json"):
-                return self._ts((media or {}).get("schema"), response=True)
-        if "text/event-stream" in content:
-            return "ReadableStream<string>"
-        if any(mt.startswith("text/") for mt in content):
-            return "string"
-        return "Blob"
+        return self._content_ts(response, response_schema=True)
+
+    def _error_response(self, op: dict[str, Any]) -> str:
+        responses = {str(k): v for k, v in (op.get("responses") or {}).items()}
+        error_types: list[str] = []
+        for k in sorted(
+            responses, key=lambda x: (0, int(x)) if x.isdigit() else (1, x)
+        ):
+            if (k.isdigit() and int(k) >= 400) or k in ("4XX", "5XX", "default"):
+                resp = self._deref(responses[k])
+                error_types.append(self._content_ts(resp, response_schema=True))
+
+        concrete = [t for t in error_types if t != "unknown"]
+        if concrete:
+            return _union(concrete)
+        return "unknown"
 
     # ------------------------------------------------------------------ rendering
 
@@ -552,6 +607,7 @@ class TypeScriptGenerator:
             out.append(f"    query: {r.query_ts};\n")
             out.append(f"    body: {r.body_ts};\n")
             out.append(f"    response: {r.response_ts};\n")
+            out.append(f"    error: {r.error_ts};\n")
             out.append(f"    request: {r.request_ts};\n")
             out.append("  };\n")
         out.append("}\n\n")

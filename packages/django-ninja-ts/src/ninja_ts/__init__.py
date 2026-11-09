@@ -2,6 +2,8 @@
 
 from ninja_ts.generator import TypeScriptGenerator
 from ninja_ts.integration import (
+    create_sdk_view,
+    create_types_view,
     export_sdk,
     export_types,
     generate_sdk,
@@ -14,6 +16,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "TypeScriptGenerator",
+    "create_sdk_view",
+    "create_types_view",
     "export_sdk",
     "export_types",
     "generate_sdk",

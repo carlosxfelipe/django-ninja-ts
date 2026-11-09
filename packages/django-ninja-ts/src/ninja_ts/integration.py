@@ -135,3 +135,55 @@ def install(
         @api.get(types_url, url_name="ninja_ts_types", **route_kwargs)
         def ninja_ts_types(request):
             return respond(generate_types(api))
+
+
+def create_sdk_view(
+    api: ApiOrSchema, *, path_prefix: str | None = None, enabled: bool | None = None
+):
+    """Return a standard Django view that dynamically serves the TypeScript SDK.
+
+    Can be mounted directly in Django ``urlpatterns``:
+    ``path("api/sdk.ts", create_sdk_view(api))``
+    """
+    from django.conf import settings
+    from django.http import Http404, HttpRequest, HttpResponse
+
+    def sdk_view(request: HttpRequest) -> HttpResponse:
+        is_enabled = bool(settings.DEBUG) if enabled is None else bool(enabled)
+        if not is_enabled:
+            raise Http404("TypeScript SDK endpoint is disabled.")
+        response = HttpResponse(
+            generate_sdk(api, path_prefix=path_prefix), content_type=TS_CONTENT_TYPE
+        )
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response["Pragma"] = "no-cache"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    return sdk_view
+
+
+def create_types_view(
+    api: ApiOrSchema, *, path_prefix: str | None = None, enabled: bool | None = None
+):
+    """Return a standard Django view that dynamically serves TypeScript declarations (.d.ts).
+
+    Can be mounted directly in Django ``urlpatterns``:
+    ``path("api/types.d.ts", create_types_view(api))``
+    """
+    from django.conf import settings
+    from django.http import Http404, HttpRequest, HttpResponse
+
+    def types_view(request: HttpRequest) -> HttpResponse:
+        is_enabled = bool(settings.DEBUG) if enabled is None else bool(enabled)
+        if not is_enabled:
+            raise Http404("TypeScript types endpoint is disabled.")
+        response = HttpResponse(
+            generate_types(api, path_prefix=path_prefix), content_type=TS_CONTENT_TYPE
+        )
+        response["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response["Pragma"] = "no-cache"
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    return types_view
