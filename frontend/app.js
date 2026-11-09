@@ -7,6 +7,52 @@
  */
 
 /**
+ * Creates an AbortSignal that aborts after a timeout in milliseconds.
+ * @param {number} [timeoutMs]
+ * @returns {AbortSignal | undefined}
+ */
+function createTimeoutSignal(timeoutMs) {
+  if (timeoutMs === undefined || timeoutMs <= 0) return undefined;
+  if (
+    typeof AbortSignal !== "undefined" &&
+    typeof AbortSignal.timeout === "function"
+  ) {
+    return AbortSignal.timeout(timeoutMs);
+  }
+  if (typeof AbortController === "undefined") return undefined;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
+}
+
+/**
+ * Combines two AbortSignals into one.
+ * @param {AbortSignal} [signalA]
+ * @param {AbortSignal} [signalB]
+ * @returns {AbortSignal | undefined}
+ */
+function combineSignals(signalA, signalB) {
+  if (!signalA) return signalB;
+  if (!signalB) return signalA;
+  if (
+    typeof AbortSignal !== "undefined" &&
+    typeof AbortSignal.any === "function"
+  ) {
+    return AbortSignal.any([signalA, signalB]);
+  }
+  if (typeof AbortController === "undefined") return signalA;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (signalA.aborted || signalB.aborted) {
+    controller.abort();
+  } else {
+    signalA.addEventListener("abort", onAbort, { once: true });
+    signalB.addEventListener("abort", onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
+/**
  * Runtime implementation of createNinjaClient() matching packages/django-ninja-ts
  * @param {string} [baseUrl=""]
  * @param {import("../sdk/api").NinjaClientOptions} [clientOptions={}]
@@ -23,15 +69,33 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
       const method = endpoint.slice(0, separator);
       const params = options.params ?? {};
 
-      // Replaces both OpenAPI {param} and Express/Gota :param
+      // Replace path parameters (supports regular, wildcard {+path}, and {path:name})
       let path = endpoint
         .slice(separator + 1)
-        .replace(/\{([^}]+)\}/g, (_match, name) => {
-          const value = params[name];
+        .replace(/\{([^}]+)\}/g, (_match, rawName) => {
+          const isCatchAll =
+            rawName.startsWith("+") ||
+            rawName.endsWith("*") ||
+            rawName.startsWith("path:");
+          const name = rawName.replace(/^(\+|path:)/, "").replace(/\*$/, "");
+          const value =
+            params[name] ?? (name !== rawName ? params[rawName] : undefined);
           if (value === undefined || value === null) {
             throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
           }
-          return encodeURIComponent(String(value));
+          if (Array.isArray(value)) {
+            return value
+              .map((seg) => encodeURIComponent(String(seg)))
+              .join("/");
+          }
+          const str = String(value);
+          if (isCatchAll || str.includes("/")) {
+            return str
+              .split("/")
+              .map((seg) => encodeURIComponent(seg))
+              .join("/");
+          }
+          return encodeURIComponent(str);
         });
 
       if (path.includes(":") || path.includes("*")) {
@@ -81,23 +145,63 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
         }
       }
 
-      const fetchFn = clientOptions.fetch || fetch;
-      const res = await fetchFn(url, {
+      const timeoutMs = options.timeoutMs ?? clientOptions.timeoutMs;
+      const timeoutSignal = createTimeoutSignal(timeoutMs);
+      const signal = combineSignals(options.signal, timeoutSignal);
+
+      /** @type {RequestInit} */
+      const init = {
         method,
         headers,
         body,
         credentials: options.credentials ?? clientOptions.credentials,
-        signal: options.signal,
-      });
+        signal,
+      };
+
+      if (clientOptions.next || options.next) {
+        // @ts-ignore
+        init.next = { ...clientOptions.next, ...options.next };
+      }
+
+      if (options.duplex) {
+        // @ts-ignore
+        init.duplex = options.duplex;
+      }
+
+      if (clientOptions.onRequest) {
+        await clientOptions.onRequest(endpoint, init);
+      }
+
+      const fetchFn = clientOptions.fetch || fetch;
+      /** @type {Response} */
+      let res;
+      try {
+        res = await fetchFn(url, init);
+      } catch (err) {
+        if (clientOptions.onError) {
+          await clientOptions.onError(
+            err instanceof Error ? err : new Error(String(err)),
+          );
+        }
+        throw err;
+      }
+
+      if (clientOptions.onResponse) {
+        await clientOptions.onResponse(res);
+      }
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: res.statusText }));
         const message =
           (err && (err.message || err.error || err.detail)) || res.statusText;
-        throw Object.assign(
+        const apiError = Object.assign(
           new Error(typeof message === "string" ? message : res.statusText),
-          { status: res.status, data: err },
+          { status: res.status, data: err, headers: res.headers },
         );
+        if (clientOptions.onError) {
+          await clientOptions.onError(apiError);
+        }
+        throw apiError;
       }
 
       if (res.status === 204) return /** @type {any} */ (undefined);
@@ -144,7 +248,13 @@ createApp({
       priority: "normal",
     });
 
-    const client = () => createNinjaClient(baseUrl.value);
+    const client = () =>
+      createNinjaClient(baseUrl.value, {
+        timeoutMs: 8000,
+        onError(err) {
+          console.warn("[DjangoNinjaClient]", err.message);
+        },
+      });
 
     async function loadTodos() {
       loading.value = true;
