@@ -18,6 +18,7 @@ EXPORTED_NAMES = (
     "RequestOptions",
     "BaseRequestOptions",
     "NextFetchRequestConfig",
+    "NinjaRetryConfig",
     "BodyEncoding",
     "NinjaClientOptions",
     "NinjaClient",
@@ -38,6 +39,15 @@ export interface NextFetchRequestConfig {
   tags?: string[];
 }
 
+export interface NinjaRetryConfig {
+  /** Maximum number of retry attempts (in addition to the initial request). */
+  attempts: number;
+  /** Base delay in milliseconds before the first retry (default: 300ms). */
+  delayMs?: number;
+  /** HTTP status codes that trigger a retry (default: [408, 429, 500, 502, 503, 504]). */
+  statusCodes?: number[];
+}
+
 export interface BaseRequestOptions {
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
@@ -46,6 +56,7 @@ export interface BaseRequestOptions {
   next?: NextFetchRequestConfig;
   duplex?: "half";
   timeoutMs?: number;
+  retry?: number | NinjaRetryConfig;
 }
 
 export type RequestOptions<K extends EndpointKey> = NinjaEndpoints[K]["request"] & BaseRequestOptions;
@@ -62,6 +73,8 @@ export interface NinjaClientOptions {
   next?: NextFetchRequestConfig;
   /** Default request timeout in milliseconds. */
   timeoutMs?: number;
+  /** Default retry policy for failed requests (network errors or retryable status codes). */
+  retry?: number | NinjaRetryConfig;
   /** Hook invoked before each request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
   onRequest?: (endpoint: string, init: RequestInit) => Promise<void> | void;
   /** Hook invoked after a response is received, before error handling or body parsing. */
@@ -318,18 +331,70 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
       await clientOptions.onRequest(endpoint, init);
     }
 
-    const fetchFn = clientOptions.fetch ?? globalThis.fetch.bind(globalThis);
-    let response: Response;
-    try {
-      response = await fetchFn(url, init);
-    } catch (networkError) {
-      if (clientOptions.onError) {
-        await clientOptions.onError(
-          networkError instanceof Error ? networkError : new Error(String(networkError))
-        );
+    const retryOpt = options.retry ?? clientOptions.retry;
+    let maxAttempts = 1;
+    let baseDelay = 300;
+    let retryStatuses = [408, 429, 500, 502, 503, 504];
+
+    if (typeof retryOpt === "number" && retryOpt > 0) {
+      maxAttempts = 1 + retryOpt;
+    } else if (typeof retryOpt === "object" && retryOpt !== null) {
+      if (typeof retryOpt.attempts === "number" && retryOpt.attempts > 0) {
+        maxAttempts = 1 + retryOpt.attempts;
       }
-      throw networkError;
+      if (typeof retryOpt.delayMs === "number" && retryOpt.delayMs >= 0) {
+        baseDelay = retryOpt.delayMs;
+      }
+      if (Array.isArray(retryOpt.statusCodes)) {
+        retryStatuses = retryOpt.statusCodes;
+      }
     }
+
+    const fetchFn = clientOptions.fetch ?? globalThis.fetch.bind(globalThis);
+    let lastResponse: Response | undefined;
+    let attempt = 0;
+
+    while (true) {
+      try {
+        const res = await fetchFn(url, init);
+        lastResponse = res;
+        if (
+          !res.ok &&
+          attempt < maxAttempts - 1 &&
+          retryStatuses.includes(res.status) &&
+          (!init.signal || !init.signal.aborted)
+        ) {
+          attempt++;
+          let delay = baseDelay * Math.pow(2, attempt - 1);
+          const retryAfter = res.headers.get("Retry-After");
+          if (retryAfter) {
+            const seconds = parseInt(retryAfter, 10);
+            if (!isNaN(seconds)) delay = seconds * 1000;
+          }
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        break;
+      } catch (networkError) {
+        if (
+          attempt < maxAttempts - 1 &&
+          (!init.signal || !init.signal.aborted)
+        ) {
+          attempt++;
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        if (clientOptions.onError) {
+          await clientOptions.onError(
+            networkError instanceof Error ? networkError : new Error(String(networkError))
+          );
+        }
+        throw networkError;
+      }
+    }
+
+    const response = lastResponse!;
 
     if (clientOptions.onResponse) {
       await clientOptions.onResponse(response);

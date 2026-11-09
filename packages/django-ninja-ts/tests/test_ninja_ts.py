@@ -315,6 +315,57 @@ def test_ninja_api_error_headers_and_timeout_types(types, sdk):
     assert "combineSignals(options.signal, timeoutSignal)" in sdk
 
 
+def test_retry_config_types_and_runtime(types, sdk):
+    assert "export interface NinjaRetryConfig {" in types
+    assert "attempts: number;" in types
+    assert "delayMs?: number;" in types
+    assert "statusCodes?: number[];" in types
+    assert "retry?: number | NinjaRetryConfig;" in types
+    assert "retryOpt = options.retry ?? clientOptions.retry" in sdk
+    assert 'res.headers.get("Retry-After")' in sdk
+
+
+def test_audit_schemas_detects_sensitive_response_fields():
+    from ninja import Field, NinjaAPI, Schema
+    from ninja_ts import audit_schemas
+
+    local = NinjaAPI(urls_namespace="security_test")
+
+    class SensitiveUserOut(Schema):
+        id: int
+        username: str
+        password_hash: str
+        secret_key: str
+        salt_field: str = Field(description="safe for public display, nowarn")
+
+    class UserInput(Schema):
+        username: str
+        password: str  # Allowed in request payload!
+
+    @local.post("/register", response=SensitiveUserOut)
+    def register(request, payload: UserInput):
+        return {}
+
+    warnings = audit_schemas(local)
+    assert len(warnings) == 2
+    assert any("password_hash" in w and "password hash" in w for w in warnings)
+    assert any("secret_key" in w and "secret key" in w for w in warnings)
+    # nowarn field and request-only password field should not trigger warnings
+    assert not any("salt_field" in w for w in warnings)
+    assert not any("UserInput" in w for w in warnings)
+
+
+def test_audit_ninja_schemas_management_command():
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    out = StringIO()
+    call_command("audit_ninja_schemas", stdout=out)
+    output = out.getvalue()
+    assert "No sensitive fields detected" in output
+
+
 def test_management_command_writes_files(tmp_path: Path):
     sdk_path = tmp_path / "nested" / "api.ts"
     call_command("generate_ts_sdk", out=str(sdk_path))
@@ -335,13 +386,16 @@ import {
   type ResponseData,
   type ResponseError,
   type NextFetchRequestConfig,
+  type NinjaRetryConfig,
 } from "./api";
 
+const retryPolicy: NinjaRetryConfig = { attempts: 2, delayMs: 150 };
 const nextConfig: NextFetchRequestConfig = { revalidate: 60, tags: ["global"] };
 const api = createNinjaClient("http://localhost:8000", {
   headers: async () => ({ Authorization: "Bearer x" }),
   next: nextConfig,
   timeoutMs: 5000,
+  retry: retryPolicy,
   onRequest(endpoint, init) {
     init.headers = new Headers(init.headers);
     (init.headers as Headers).set("X-Client-Hook", "active");
@@ -358,6 +412,7 @@ async function main(): Promise<void> {
   const list: ResponseData<"GET /api/todos"> = await api.fetch("GET /api/todos", {
     next: { revalidate: 30, tags: ["todos"] },
     timeoutMs: 2000,
+    retry: 3,
   });
   const filtered = await api.fetch("GET /api/todos", { query: { limit: 5 } });
   const one = await api.fetch("GET /api/todos/{id}", { params: { id: "todo_1" } });

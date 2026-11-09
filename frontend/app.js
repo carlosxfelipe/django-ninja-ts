@@ -172,19 +172,71 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
         await clientOptions.onRequest(endpoint, init);
       }
 
-      const fetchFn = clientOptions.fetch || fetch;
-      /** @type {Response} */
-      let res;
-      try {
-        res = await fetchFn(url, init);
-      } catch (err) {
-        if (clientOptions.onError) {
-          await clientOptions.onError(
-            err instanceof Error ? err : new Error(String(err)),
-          );
+      const retryOpt = options.retry ?? clientOptions.retry;
+      let maxAttempts = 1;
+      let baseDelay = 300;
+      let retryStatuses = [408, 429, 500, 502, 503, 504];
+
+      if (typeof retryOpt === "number" && retryOpt > 0) {
+        maxAttempts = 1 + retryOpt;
+      } else if (typeof retryOpt === "object" && retryOpt !== null) {
+        if (typeof retryOpt.attempts === "number" && retryOpt.attempts > 0) {
+          maxAttempts = 1 + retryOpt.attempts;
         }
-        throw err;
+        if (typeof retryOpt.delayMs === "number" && retryOpt.delayMs >= 0) {
+          baseDelay = retryOpt.delayMs;
+        }
+        if (Array.isArray(retryOpt.statusCodes)) {
+          retryStatuses = retryOpt.statusCodes;
+        }
       }
+
+      const fetchFn = clientOptions.fetch || fetch;
+      /** @type {Response | undefined} */
+      let lastRes;
+      let attempt = 0;
+
+      while (true) {
+        try {
+          const res = await fetchFn(url, init);
+          lastRes = res;
+          if (
+            !res.ok &&
+            attempt < maxAttempts - 1 &&
+            retryStatuses.includes(res.status) &&
+            (!init.signal || !init.signal.aborted)
+          ) {
+            attempt++;
+            let delay = baseDelay * Math.pow(2, attempt - 1);
+            const retryAfter = res.headers.get("Retry-After");
+            if (retryAfter) {
+              const seconds = parseInt(retryAfter, 10);
+              if (!isNaN(seconds)) delay = seconds * 1000;
+            }
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          break;
+        } catch (err) {
+          if (
+            attempt < maxAttempts - 1 &&
+            (!init.signal || !init.signal.aborted)
+          ) {
+            attempt++;
+            const delay = baseDelay * Math.pow(2, attempt - 1);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          if (clientOptions.onError) {
+            await clientOptions.onError(
+              err instanceof Error ? err : new Error(String(err)),
+            );
+          }
+          throw err;
+        }
+      }
+
+      const res = /** @type {Response} */ (lastRes);
 
       if (clientOptions.onResponse) {
         await clientOptions.onResponse(res);

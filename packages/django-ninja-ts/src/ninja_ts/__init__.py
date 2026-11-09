@@ -11,11 +11,13 @@ from ninja_ts.integration import (
     get_openapi_schema,
     install,
 )
+from ninja_ts.security import audit_schemas, is_sensitive_field_name
 
 __version__ = "0.1.0"
 
 __all__ = [
     "TypeScriptGenerator",
+    "audit_schemas",
     "create_sdk_view",
     "create_types_view",
     "export_sdk",
@@ -24,4 +26,5 @@ __all__ = [
     "generate_types",
     "get_openapi_schema",
     "install",
+    "is_sensitive_field_name",
 ]
