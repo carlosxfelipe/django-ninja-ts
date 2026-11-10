@@ -32,3 +32,8 @@ staticfiles/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Project specific
+TODO.md
+SECURITY_TODO.md
+PUBLISHING.md

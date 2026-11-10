@@ -1,5 +1,10 @@
 # Django Ninja TypeScript SDK 🥷
 
+[![Python >= 3.12](https://img.shields.io/badge/python-%3E%3D3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Django >= 6.0](https://img.shields.io/badge/django-%3E%3D6.0-092E20?logo=django&logoColor=white)](https://www.djangoproject.com/)
+[![Django Ninja >= 1.8.0](https://img.shields.io/badge/django--ninja-%3E%3D1.8.0-009688)](https://django-ninja.dev/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 An end-to-end, zero-dependency TypeScript client SDK generator for [Django Ninja](https://django-ninja.dev) APIs.
 
 Inspired by the architecture and developer experience of [**Gota**](https://github.com/carlosxfelipe/gota) (a minimalist REPR Go framework with native TypeScript SDK generation), this project brings the same seamless type safety to Django Ninja and Python.
@@ -13,9 +18,25 @@ Bridge the gap between Python backend models and TypeScript frontends without re
 - **Typed Endpoint Catalog**: All routes are mapped in `NinjaEndpoints` with strict typing for path params (`{id}`), query parameters, request bodies, and responses.
 - **Zero-Dependency Client**: Emits a standalone `createNinjaClient()` runtime powered strictly by native `fetch`, `Headers`, `URLSearchParams`, and `FormData` (works in browsers, Node 18+, Deno, and Bun).
 
+## 📦 Installation
+
+Install the package directly into your Django project using `uv` or `pip`:
+
+```bash
+# Using uv (recommended)
+uv add "git+https://github.com/carlosxfelipe/django-ninja-ts.git#subdirectory=packages/django-ninja-ts"
+
+# Using pip
+pip install "git+https://github.com/carlosxfelipe/django-ninja-ts.git#subdirectory=packages/django-ninja-ts"
+```
+
+*(Once published to PyPI, it will also be available via `uv add django-ninja-ts`)*.
+
+> **Requirements:** Python 3.12+, Django 6.0+, and Django Ninja 1.8.0+ (automatically installed as dependencies if not already present in your project).
+
 ## 🚀 Quickstart
 
-### 1. Install dependencies
+### 1. Development & Demo Setup
 
 This project is managed with [Astral's `uv`](https://astral.sh/uv):
 
@@ -63,18 +84,37 @@ This repository is organized as a `uv` workspace:
 
 ## 🧪 Tests & Quality
 
+### 1. Test Suite & TypeScript Type Checking
+
 Run the test suite (includes end-to-end type checking with the TypeScript compiler `tsc`):
 
 ```bash
 uv run pytest packages/django-ninja-ts
 ```
 
-Check linting and formatting with Ruff:
+### 2. Code Quality & Formatting (Ruff)
+
+**Format and auto-fix code (local development):**
 
 ```bash
-uv run ruff check
-uv run ruff format --check
+# Format all code
+uv run ruff format .
+
+# Run linter and apply safe fixes automatically
+uv run ruff check --fix .
 ```
+
+**Verify without modifying files (CI / Pull Requests):**
+
+```bash
+# Check linting rules
+uv run ruff check .
+
+# Check formatting compliance
+uv run ruff format --check .
+```
+
+### 3. Build Distribution Packages
 
 Build the distribution packages (`.whl` and `.tar.gz`):
 
