@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Django Ninja TypeScript SDK Logo">
+  <defs>
+    <linearGradient id="ts-hood" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B86D9" />
+      <stop offset="55%" stop-color="#3178C6" />
+      <stop offset="100%" stop-color="#235A97" />
+    </linearGradient>
+    <linearGradient id="ts-band" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1A4473" />
+      <stop offset="50%" stop-color="#235A97" />
+      <stop offset="100%" stop-color="#1A4473" />
+    </linearGradient>
+    <linearGradient id="ts-body" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2864A8" />
+      <stop offset="100%" stop-color="#1A4473" />
+    </linearGradient>
+    <clipPath id="hood-clip">
+      <path d="M 128 36 C 174 36, 204 68, 204 112 C 204 148, 174 184, 128 188 C 82 184, 52 148, 52 112 C 52 68, 82 36, 128 36 Z" />
+    </clipPath>
+  </defs>
+
+  <!-- Headband flowing tails -->
+  <path
+    d="M 188 88 C 214 78, 232 72, 246 80 C 236 94, 218 102, 192 104 Z"
+    fill="#235A97"
+  />
+  <path
+    d="M 190 100 C 216 104, 234 114, 242 128 C 224 128, 206 120, 186 112 Z"
+    fill="#3178C6"
+  />
+
+  <!-- Shinobi shoulders / collar -->
+  <path
+    d="M 52 224 C 58 188, 86 174, 128 174 C 170 174, 198 188, 204 224 C 206 233, 200 240, 190 240 L 66 240 C 56 240, 50 233, 52 224 Z"
+    fill="url(#ts-body)"
+  />
+  <!-- Collar V-fold accents -->
+  <path
+    d="M 96 178 L 128 214 L 160 178 L 148 175 L 128 198 L 108 175 Z"
+    fill="#3178C6"
+  />
+
+  <!-- Ninja hood base -->
+  <path
+    d="M 128 36 C 174 36, 204 68, 204 112 C 204 148, 174 184, 128 188 C 82 184, 52 148, 52 112 C 52 68, 82 36, 128 36 Z"
+    fill="url(#ts-hood)"
+  />
+
+  <!-- Clipped internal hood layers -->
+  <g clip-path="url(#hood-clip)">
+    <!-- Lower face mask wrap -->
+    <path
+      d="M 50 124 C 78 134, 102 138, 128 138 C 154 138, 178 134, 206 124 L 206 192 L 50 192 Z"
+      fill="#235A97"
+    />
+    <path
+      d="M 56 131 C 82 141, 105 144, 128 144 C 151 144, 174 141, 200 131"
+      fill="none"
+      stroke="#3B86D9"
+      stroke-width="2.5"
+      stroke-linecap="round"
+      opacity="0.5"
+    />
+
+    <!-- Eye visor slit -->
+    <path
+      d="M 66 112 C 86 101, 170 101, 190 112 C 188 128, 164 138, 128 138 C 92 138, 68 128, 66 112 Z"
+      fill="#0B1F3A"
+    />
+
+    <!-- Sharp ninja eyes -->
+    <path
+      d="M 84 115 L 114 121 C 107 128, 92 127, 84 115 Z"
+      fill="#FFFFFF"
+    />
+    <path
+      d="M 172 115 L 142 121 C 149 128, 164 127, 172 115 Z"
+      fill="#FFFFFF"
+    />
+
+    <!-- Headband (Hachimaki) -->
+    <path
+      d="M 48 86 C 84 74, 172 74, 208 86 L 208 102 C 172 90, 84 90, 48 102 Z"
+      fill="url(#ts-band)"
+    />
+  </g>
+
+  <!-- TypeScript emblem plate on headband -->
+  <rect
+    x="108"
+    y="74"
+    width="40"
+    height="24"
+    rx="5"
+    fill="#FFFFFF"
+    stroke="#1A4473"
+    stroke-width="2"
+  />
+
+  <!-- Crisp vector "TS" monogram -->
+  <path
+    d="M 114.5 79.2 H 126.5 V 82.1 H 122 V 93 H 119 V 82.1 H 114.5 Z"
+    fill="#3178C6"
+  />
+  <path
+    d="M 139.5 81.4 C 138.5 80.2, 136.8 80, 134.8 80 C 132.2 80, 130.6 81.2, 130.6 82.9 C 130.6 84.8, 132.5 85.4, 135.2 86 C 138 86.6, 139.9 87.3, 139.9 89.4 C 139.9 91.2, 137.8 92.2, 134.8 92.2 C 132.4 92.2, 130.8 91.5, 130 90.4"
+    fill="none"
+    stroke="#3178C6"
+    stroke-width="2.8"
+    stroke-linecap="round"
+  />
+</svg>

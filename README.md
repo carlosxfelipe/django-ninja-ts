@@ -1,11 +1,20 @@
-# Django Ninja TypeScript SDK 🥷
+<p align="center">
+  <img src="assets/logo.svg" alt="django-ninja-ts logo" height="90" />
+  <img src="assets/wordmark.svg" alt="django-ninja-ts" height="90" />
+</p>
 
-[![Python >= 3.12](https://img.shields.io/badge/python-%3E%3D3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Django >= 6.0](https://img.shields.io/badge/django-%3E%3D6.0-092E20?logo=django&logoColor=white)](https://www.djangoproject.com/)
-[![Django Ninja >= 1.8.0](https://img.shields.io/badge/django--ninja-%3E%3D1.8.0-009688)](https://django-ninja.dev/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  <em>An end-to-end, zero-dependency TypeScript client SDK generator for <a href="https://django-ninja.dev">Django Ninja</a> APIs.</em>
+</p>
 
-An end-to-end, zero-dependency TypeScript client SDK generator for [Django Ninja](https://django-ninja.dev) APIs.
+<p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-%3E%3D3.12-3776AB?logo=python&logoColor=white" alt="Python >= 3.12" /></a>
+  <a href="https://www.djangoproject.com/"><img src="https://img.shields.io/badge/django-%3E%3D6.0-092E20?logo=django&logoColor=white" alt="Django >= 6.0" /></a>
+  <a href="https://django-ninja.dev/"><img src="https://img.shields.io/badge/django--ninja-%3E%3D1.8.0-009688" alt="Django Ninja >= 1.8.0" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="License: MIT" /></a>
+</p>
+
+---
 
 Inspired by the architecture and developer experience of [**Gota**](https://github.com/carlosxfelipe/gota) (a minimalist REPR Go framework with native TypeScript SDK generation), this project brings the same seamless type safety to Django Ninja and Python.
 
@@ -124,24 +133,10 @@ uv run pytest packages/django-ninja-ts
 
 ### 2. Code Quality & Formatting (Ruff)
 
-**Format and auto-fix code (local development):**
+Run the formatting and linting script (runs `ruff check --fix`, `ruff format`, and `shfmt`):
 
 ```bash
-# Format all code
-uv run ruff format .
-
-# Run linter and apply safe fixes automatically
-uv run ruff check --fix .
-```
-
-**Verify without modifying files (CI / Pull Requests):**
-
-```bash
-# Check linting rules
-uv run ruff check .
-
-# Check formatting compliance
-uv run ruff format --check .
+./fmt.sh
 ```
 
 ### 3. Build Distribution Packages
