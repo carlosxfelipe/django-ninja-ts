@@ -22,11 +22,15 @@ Bridge the gap between Python backend models and TypeScript frontends without re
 
 Install the package directly into your Django project using `uv` or `pip`:
 
-```bash
-# Using uv (recommended)
-uv add "git+https://github.com/carlosxfelipe/django-ninja-ts.git#subdirectory=packages/django-ninja-ts"
+**Using `uv` (recommended):**
 
-# Using pip
+```bash
+uv add "git+https://github.com/carlosxfelipe/django-ninja-ts.git#subdirectory=packages/django-ninja-ts"
+```
+
+**Using `pip`:**
+
+```bash
 pip install "git+https://github.com/carlosxfelipe/django-ninja-ts.git#subdirectory=packages/django-ninja-ts"
 ```
 
@@ -82,11 +86,15 @@ The server will start at `http://localhost:8000`:
 
 Export the standalone SDK or `.d.ts` declarations directly to disk without running an HTTP server:
 
-```bash
-# Full standalone client SDK
-uv run python manage.py generate_ts_sdk -o ./sdk/api.ts
+**Full standalone client SDK:**
 
-# Type declarations only (.d.ts)
+```bash
+uv run python manage.py generate_ts_sdk -o ./sdk/api.ts
+```
+
+**Type declarations only (`.d.ts`):**
+
+```bash
 uv run python manage.py generate_ts_sdk --types-only -o ./sdk/api.d.ts
 ```
 

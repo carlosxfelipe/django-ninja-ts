@@ -103,9 +103,7 @@ def _union(parts: list[str]) -> str:
 def _doc_lines(text: str | None) -> list[str]:
     if not text:
         return []
-    return [
-        line.rstrip().replace("*/", "*\\/") for line in str(text).strip().splitlines()
-    ]
+    return [line.rstrip().replace("*/", "*\\/") for line in text.strip().splitlines()]
 
 
 def _jsdoc(lines: list[str], indent: str) -> str:
