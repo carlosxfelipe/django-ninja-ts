@@ -72,6 +72,7 @@ def test_response_exclusions_disable_all_fields_present():
 def test_endpoint_without_inputs(types):
     block = endpoint_block(types, "GET /api/health")
     assert "response: unknown;" in block
+    assert "error: NinjaHttpError;" in block
     assert "request: { params?: never; query?: never; body?: never };" in block
 
 
@@ -79,7 +80,7 @@ def test_path_params_and_response(types):
     block = endpoint_block(types, "GET /api/todos/{id}")
     assert "params: { id: string };" in block
     assert "response: TodoOut;" in block
-    assert "error: unknown;" in block
+    assert "error: NinjaHttpError | NinjaValidationError;" in block
 
 
 def test_endpoint_with_explicit_error_schemas(types):
@@ -364,6 +365,7 @@ def test_upload_detection_and_form_data_cleanup(sdk):
 
 
 def test_validation_error_and_context_types(types):
+    assert "export interface NinjaHttpError {" in types
     assert "export interface NinjaValidationErrorItem {" in types
     assert "export interface NinjaValidationError {" in types
     assert "export interface RequestContext {" in types
@@ -373,7 +375,9 @@ def test_validation_error_and_context_types(types):
 def test_query_param_serialization_and_return_cast(sdk):
     assert "function appendQueryParam(search: URLSearchParams" in sdk
     assert "appendQueryParam(search, key, value);" in sdk
-    assert "as Promise<ResponseData<any>>;" in sdk
+    assert "as Promise<ResponseData<typeof endpoint>>;" in sdk
+    assert "ResponseData<any>" not in sdk
+    assert "{} extends" not in sdk
 
 
 def test_audit_schemas_detects_sensitive_response_fields():

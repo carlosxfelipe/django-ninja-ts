@@ -113,6 +113,82 @@ A zero-build Vue 3 frontend (replicated from `gota/examples/frontend`) is includ
 
 Simply open `frontend/index.html` in your browser while the Django server is running to interact with the API, test real-time validation, and inspect the client.
 
+## ⚡ Usage in Next.js (App Router)
+
+Generate the SDK directly into your Next.js app (`src/lib/api.ts`):
+
+```bash
+uv run python manage.py generate_ts_sdk -o ../my-next-app/src/lib/api.ts
+```
+
+### 1. Client Factory & Validation Helper (`src/lib/client.ts`)
+
+```typescript
+import {
+  createNinjaClient,
+  isNinjaApiError,
+  type NinjaValidationError,
+} from "./api";
+
+export const api = createNinjaClient(
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000",
+  {
+    timeoutMs: 8000,
+    retry: { attempts: 2, delayMs: 250 },
+    onError(error, context) {
+      if (isNinjaApiError(error)) {
+        console.warn(`[SDK] ${error.status} on ${context.endpoint}: ${error.message}`);
+      }
+    },
+  }
+);
+```
+
+### 2. Server Component with Native Next.js Caching (`src/app/page.tsx`)
+
+The generated client natively forwards `cache` and `next` (`revalidate` / `tags`) options to Next.js's `fetch`:
+
+```tsx
+import { api } from "@/lib/client";
+
+export default async function HomePage() {
+  const todos = await api.fetch("GET /api/todos", {
+    next: { revalidate: 30, tags: ["todos"] },
+  });
+
+  return (
+    <ul>
+      {todos.map((todo) => (
+        <li key={todo.id}>{todo.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+### 3. Client Component Mutations & `422` Validation Errors
+
+```tsx
+"use client";
+
+import { isNinjaApiError, type NinjaValidationError } from "@/lib/api";
+import { api } from "@/lib/client";
+
+async function createTodo(title: string) {
+  try {
+    return await api.fetch("POST /api/todos", {
+      body: { title, priority: "normal" },
+    });
+  } catch (err) {
+    if (isNinjaApiError<NinjaValidationError>(err)) {
+      // Strictly typed Pydantic / Django Ninja validation items (`loc`, `msg`, `type`)
+      console.error(err.status, err.data.detail);
+    }
+    throw err;
+  }
+}
+```
+
 ## 📦 Workspace Structure
 
 This repository is organized as a `uv` workspace:

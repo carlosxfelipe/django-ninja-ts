@@ -474,7 +474,10 @@ class TypeScriptGenerator:
 
         body_ts, body_required, body_encoding = self._request_body(op)
         response_ts = self._response(op)
-        error_ts = self._error_response(op)
+        has_inputs = bool(
+            path_fields or query_fields or header_fields or body_ts != "void"
+        )
+        error_ts = self._error_response(op, has_inputs=has_inputs)
 
         request = []
         request.append(f"params: {params_ts}" if path_fields else "params?: never")
@@ -565,7 +568,7 @@ class TypeScriptGenerator:
             return "void"
         return self._content_ts(response, response_schema=True)
 
-    def _error_response(self, op: dict[str, Any]) -> str:
+    def _error_response(self, op: dict[str, Any], *, has_inputs: bool = False) -> str:
         responses = {str(k): v for k, v in (op.get("responses") or {}).items()}
         error_types: list[str] = []
         for k in sorted(
@@ -578,7 +581,9 @@ class TypeScriptGenerator:
         concrete = [t for t in error_types if t != "unknown"]
         if concrete:
             return _union(concrete)
-        return "unknown"
+        if has_inputs:
+            return "NinjaHttpError | NinjaValidationError"
+        return "NinjaHttpError"
 
     # ------------------------------------------------------------------ rendering
 

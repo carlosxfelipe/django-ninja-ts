@@ -53,7 +53,7 @@ export interface NinjaEndpoints {
     query: void;
     body: void;
     response: TodoOut[];
-    error: unknown;
+    error: NinjaHttpError;
     request: { params?: never; query?: never; body?: never };
   };
   /**
@@ -67,7 +67,7 @@ export interface NinjaEndpoints {
     query: void;
     body: void;
     response: TodoOut;
-    error: unknown;
+    error: NinjaHttpError | NinjaValidationError;
     request: { params: { id: string }; query?: never; body?: never };
   };
   /**
@@ -81,7 +81,7 @@ export interface NinjaEndpoints {
     query: void;
     body: TodoIn;
     response: TodoOut;
-    error: unknown;
+    error: NinjaHttpError | NinjaValidationError;
     request: { params?: never; query?: never; body: TodoIn };
   };
 }
@@ -93,6 +93,10 @@ export type RequestQuery<K extends EndpointKey> = NinjaEndpoints[K]["query"];
 export type RequestBody<K extends EndpointKey> = NinjaEndpoints[K]["body"];
 export type ResponseData<K extends EndpointKey> = NinjaEndpoints[K]["response"];
 export type ResponseError<K extends EndpointKey> = NinjaEndpoints[K]["error"];
+
+export interface NinjaHttpError {
+  detail: string;
+}
 
 export interface NinjaValidationErrorItem {
   loc: (string | number)[];
@@ -171,7 +175,7 @@ export interface NinjaClient {
   readonly baseUrl: string;
   fetch<K extends EndpointKey>(
     endpoint: K,
-    ...args: {} extends NinjaEndpoints[K]["request"]
+    ...args: Record<never, never> extends NinjaEndpoints[K]["request"]
       ? [options?: RequestOptions<K>]
       : [options: RequestOptions<K>]
   ): Promise<ResponseData<K>>;
@@ -625,7 +629,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     baseUrl: root,
     fetch(endpoint, ...args) {
       const [options] = args as unknown as [RawRequestOptions?];
-      return request(String(endpoint), options ?? {}) as Promise<ResponseData<any>>;
+      return request(String(endpoint), options ?? {}) as Promise<ResponseData<typeof endpoint>>;
     },
   };
 }
