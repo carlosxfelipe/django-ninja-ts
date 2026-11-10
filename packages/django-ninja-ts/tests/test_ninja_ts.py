@@ -117,17 +117,29 @@ def test_wildcard_catch_all_path_param(types):
 
 def test_client_lifecycle_hooks(types, sdk):
     assert (
-        "onRequest?: (endpoint: string, init: RequestInit) => Promise<void> | void;"
+        "onRequest?: (endpoint: string, init: RequestInit, context: RequestContext) => Promise<void> | void;"
         in types
     )
-    assert "onResponse?: (response: Response) => Promise<void> | void;" in types
-    assert "onError?: (error: NinjaApiError | Error) => Promise<void> | void;" in types
+    assert (
+        "onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;"
+        in types
+    )
+    assert (
+        "onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;"
+        in types
+    )
     assert "if (clientOptions.onRequest) {" in sdk
-    assert "await clientOptions.onRequest(endpoint, init);" in sdk
+    assert "await clientOptions.onRequest(endpoint, init, context);" in sdk
+    assert "if (options.onRequest) {" in sdk
+    assert "await options.onRequest(endpoint, init, context);" in sdk
     assert "if (clientOptions.onResponse) {" in sdk
-    assert "await clientOptions.onResponse(response);" in sdk
+    assert "await clientOptions.onResponse(response, context);" in sdk
+    assert "if (options.onResponse) {" in sdk
+    assert "await options.onResponse(response, context);" in sdk
     assert "if (clientOptions.onError) {" in sdk
-    assert "await clientOptions.onError(apiError);" in sdk
+    assert "await clientOptions.onError(apiError, context);" in sdk
+    assert "if (options.onError) {" in sdk
+    assert "await options.onError(apiError, context);" in sdk
 
 
 def test_deprecated_and_summary_jsdoc(types):
@@ -309,7 +321,16 @@ def test_create_sdk_and_types_views():
 
 def test_ninja_api_error_headers_and_timeout_types(types, sdk):
     assert "readonly headers: Headers;" in types
+    assert "readonly statusText: string;" in types
     assert "this.headers = response.headers;" in sdk
+    assert "this.statusText = response.statusText;" in sdk
+    assert "Object.setPrototypeOf(this, NinjaApiError.prototype);" in sdk
+    assert (
+        "export declare function isNinjaApiError<T = unknown>(error: unknown): error is NinjaApiError<T>;"
+        in types
+    )
+    assert "export function isNinjaApiError<T = unknown>" in sdk
+    assert "async function readErrorBody(response: Response): Promise<unknown>" in sdk
     assert "timeoutMs?: number;" in types
     assert "createTimeoutSignal(timeoutMs)" in sdk
     assert "combineSignals(options.signal, timeoutSignal)" in sdk
@@ -320,11 +341,33 @@ def test_retry_config_types_and_runtime(types, sdk):
     assert "attempts: number;" in types
     assert "delayMs?: number;" in types
     assert "statusCodes?: number[];" in types
+    assert "methods?: string[];" in types
     assert "retry?: number | NinjaRetryConfig;" in types
-    assert "retryOpt = options.retry ?? clientOptions.retry" in sdk
+    assert "export declare const DEFAULT_RETRY_METHODS: readonly string[];" in types
+    assert (
+        'export const DEFAULT_RETRY_METHODS: readonly string[] = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];'
+        in sdk
+    )
+    assert "!retryMethods.includes(method.toUpperCase())" in sdk
+    assert (
+        "function retryDelay(attempt: number, baseDelay: number, res?: Response)" in sdk
+    )
     assert 'res.headers.get("Retry-After")' in sdk
     assert "Math.random()" in sdk
     assert "Date.parse(retryAfter)" in sdk
+
+
+def test_upload_detection_and_form_data_cleanup(sdk):
+    assert "function hasBlobValue(value: unknown" in sdk
+    assert 'headers.delete("Content-Type");' in sdk
+    assert "BINARY_CONTENT_TYPE = /^(image|audio|video)\\/" in sdk
+
+
+def test_validation_error_and_context_types(types):
+    assert "export interface NinjaValidationErrorItem {" in types
+    assert "export interface NinjaValidationError {" in types
+    assert "export interface RequestContext {" in types
+    assert "endpoint: string;\n  url: string;" in types
 
 
 def test_query_param_serialization_and_return_cast(sdk):
@@ -391,28 +434,38 @@ CONSUMER = """
 import {
   createNinjaClient,
   NinjaApiError,
+  isNinjaApiError,
+  DEFAULT_RETRY_METHODS,
   type ResponseData,
   type ResponseError,
   type NextFetchRequestConfig,
   type NinjaRetryConfig,
+  type RequestContext,
+  type NinjaValidationError,
 } from "./api";
 
-const retryPolicy: NinjaRetryConfig = { attempts: 2, delayMs: 150 };
+const retryPolicy: NinjaRetryConfig = {
+  attempts: 2,
+  delayMs: 150,
+  methods: [...DEFAULT_RETRY_METHODS, "PATCH"],
+  statusCodes: [503],
+};
 const nextConfig: NextFetchRequestConfig = { revalidate: 60, tags: ["global"] };
 const api = createNinjaClient("http://localhost:8000", {
   headers: async () => ({ Authorization: "Bearer x" }),
   next: nextConfig,
   timeoutMs: 5000,
   retry: retryPolicy,
-  onRequest(endpoint, init) {
+  onRequest(endpoint, init, context) {
     init.headers = new Headers(init.headers);
     (init.headers as Headers).set("X-Client-Hook", "active");
+    console.log("Sending", context.url);
   },
-  onResponse(res) {
-    if (!res.ok) console.warn("Request failed with status", res.status);
+  onResponse(res, context) {
+    if (!res.ok) console.warn("Request failed with status", res.status, context.endpoint);
   },
-  onError(err) {
-    console.error("Client hook error:", err.message);
+  onError(err, context) {
+    console.error("Client hook error:", err.message, context.endpoint);
   },
 });
 
@@ -421,6 +474,15 @@ async function main(): Promise<void> {
     next: { revalidate: 30, tags: ["todos"] },
     timeoutMs: 2000,
     retry: 3,
+    onRequest(endpoint, _init, ctx) {
+      console.log("Per request hook for", endpoint, ctx.url);
+    },
+    onResponse(res, ctx) {
+      console.log("Per request response for", ctx.endpoint, res.status);
+    },
+    onError(err, ctx) {
+      console.log("Per request error for", ctx.endpoint, err.message);
+    },
   });
   const filtered = await api.fetch("GET /api/todos", { query: { limit: 5 } });
   const one = await api.fetch("GET /api/todos/{id}", { params: { id: "todo_1" } });
@@ -459,10 +521,11 @@ async function main(): Promise<void> {
   try {
     await api.fetch("GET /api/todos/{id}/strict", { params: { id: "todo_1" } });
   } catch (err) {
-    if (err instanceof NinjaApiError) {
-      const errData = err.data as StrictError;
+    if (isNinjaApiError<StrictError>(err)) {
+      const errData: StrictError = err.data;
+      const statusText: string = err.statusText;
       const contentType: string | null = err.headers.get("content-type");
-      console.log(err.status, errData, contentType);
+      console.log(err.status, statusText, errData, contentType);
     }
   }
   console.log(list, filtered, done, created, removed, file1, file2);

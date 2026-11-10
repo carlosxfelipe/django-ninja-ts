@@ -15,14 +15,19 @@ EXPORTED_NAMES = (
     "RequestBody",
     "ResponseData",
     "ResponseError",
+    "NinjaValidationErrorItem",
+    "NinjaValidationError",
+    "RequestContext",
     "RequestOptions",
     "BaseRequestOptions",
     "NextFetchRequestConfig",
     "NinjaRetryConfig",
+    "DEFAULT_RETRY_METHODS",
     "BodyEncoding",
     "NinjaClientOptions",
     "NinjaClient",
     "NinjaApiError",
+    "isNinjaApiError",
     "createNinjaClient",
 )
 
@@ -33,6 +38,22 @@ export type RequestQuery<K extends EndpointKey> = NinjaEndpoints[K]["query"];
 export type RequestBody<K extends EndpointKey> = NinjaEndpoints[K]["body"];
 export type ResponseData<K extends EndpointKey> = NinjaEndpoints[K]["response"];
 export type ResponseError<K extends EndpointKey> = NinjaEndpoints[K]["error"];
+
+export interface NinjaValidationErrorItem {
+  loc: (string | number)[];
+  msg: string;
+  type: string;
+  ctx?: Record<string, unknown>;
+}
+
+export interface NinjaValidationError {
+  detail: NinjaValidationErrorItem[];
+}
+
+export interface RequestContext {
+  endpoint: string;
+  url: string;
+}
 
 export interface NextFetchRequestConfig {
   revalidate?: number | false;
@@ -46,6 +67,8 @@ export interface NinjaRetryConfig {
   delayMs?: number;
   /** HTTP status codes that trigger a retry (default: [408, 429, 500, 502, 503, 504]). */
   statusCodes?: number[];
+  /** HTTP methods eligible for retries (default: ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]). */
+  methods?: string[];
 }
 
 export interface BaseRequestOptions {
@@ -57,6 +80,12 @@ export interface BaseRequestOptions {
   duplex?: "half";
   timeoutMs?: number;
   retry?: number | NinjaRetryConfig;
+  /** Hook invoked before this request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
+  onRequest?: (endpoint: string, init: RequestInit, context: RequestContext) => Promise<void> | void;
+  /** Hook invoked after a response is received for this request. */
+  onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
+  /** Hook invoked when an error occurs for this request. */
+  onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;
 }
 
 export type RequestOptions<K extends EndpointKey> = NinjaEndpoints[K]["request"] & BaseRequestOptions;
@@ -76,11 +105,11 @@ export interface NinjaClientOptions {
   /** Default retry policy for failed requests (network errors or retryable status codes). */
   retry?: number | NinjaRetryConfig;
   /** Hook invoked before each request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
-  onRequest?: (endpoint: string, init: RequestInit) => Promise<void> | void;
+  onRequest?: (endpoint: string, init: RequestInit, context: RequestContext) => Promise<void> | void;
   /** Hook invoked after a response is received, before error handling or body parsing. */
-  onResponse?: (response: Response) => Promise<void> | void;
+  onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
   /** Hook invoked when an error occurs (network failure or non-2xx HTTP response). */
-  onError?: (error: NinjaApiError | Error) => Promise<void> | void;
+  onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;
 }
 
 export interface NinjaClient {
@@ -95,32 +124,46 @@ export interface NinjaClient {
 """
 
 DECLARATIONS = r"""
+export declare const DEFAULT_RETRY_METHODS: readonly string[];
+
 export declare class NinjaApiError<T = unknown> extends Error {
   readonly status: number;
+  readonly statusText: string;
   readonly data: T;
   readonly response: Response;
   readonly headers: Headers;
   constructor(response: Response, data: T, message?: string);
 }
 
+export declare function isNinjaApiError<T = unknown>(error: unknown): error is NinjaApiError<T>;
+
 export declare function createNinjaClient(baseUrl?: string, clientOptions?: NinjaClientOptions): NinjaClient;
 """
 
 IMPLEMENTATION = r"""
+export const DEFAULT_RETRY_METHODS: readonly string[] = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
+
 export class NinjaApiError<T = unknown> extends Error {
   readonly status: number;
+  readonly statusText: string;
   readonly data: T;
   readonly response: Response;
   readonly headers: Headers;
 
   constructor(response: Response, data: T, message?: string) {
     super(message ?? `Request failed with status ${response.status}`);
+    Object.setPrototypeOf(this, NinjaApiError.prototype);
     this.name = "NinjaApiError";
     this.status = response.status;
+    this.statusText = response.statusText;
     this.data = data;
     this.response = response;
     this.headers = response.headers;
   }
+}
+
+export function isNinjaApiError<T = unknown>(error: unknown): error is NinjaApiError<T> {
+  return error instanceof NinjaApiError;
 }
 
 type FormEntry = [string, string | Blob];
@@ -185,6 +228,20 @@ function isBodyInit(body: unknown): body is BodyInit {
   );
 }
 
+function hasBlobValue(value: unknown, seen = new Set<unknown>()): boolean {
+  if (typeof Blob !== "undefined" && value instanceof Blob) return true;
+  if (typeof File !== "undefined" && value instanceof File) return true;
+  if (!value || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.some((item) => hasBlobValue(item, seen));
+  }
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    if (hasBlobValue(v, seen)) return true;
+  }
+  return false;
+}
+
 function createTimeoutSignal(timeoutMs?: number): AbortSignal | undefined {
   if (timeoutMs === undefined || timeoutMs <= 0) return undefined;
   if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -192,7 +249,11 @@ function createTimeoutSignal(timeoutMs?: number): AbortSignal | undefined {
   }
   if (typeof AbortController === "undefined") return undefined;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutReason =
+    typeof DOMException !== "undefined"
+      ? new DOMException("The operation timed out.", "TimeoutError")
+      : new Error("The operation timed out.");
+  const timer: unknown = setTimeout(() => controller.abort(timeoutReason), timeoutMs);
   if (
     typeof timer === "object" &&
     timer &&
@@ -212,16 +273,20 @@ function combineSignals(signalA?: AbortSignal, signalB?: AbortSignal): AbortSign
   }
   if (typeof AbortController === "undefined") return signalA;
   const controller = new AbortController();
-  const onAbort = () => {
-    controller.abort();
-    signalA.removeEventListener("abort", onAbort);
-    signalB.removeEventListener("abort", onAbort);
+  const onAbort = (sig: AbortSignal) => {
+    controller.abort(sig.reason);
+    signalA.removeEventListener("abort", handleA);
+    signalB.removeEventListener("abort", handleB);
   };
-  if (signalA.aborted || signalB.aborted) {
-    controller.abort();
+  const handleA = () => onAbort(signalA);
+  const handleB = () => onAbort(signalB);
+  if (signalA.aborted) {
+    controller.abort(signalA.reason);
+  } else if (signalB.aborted) {
+    controller.abort(signalB.reason);
   } else {
-    signalA.addEventListener("abort", onAbort, { once: true });
-    signalB.addEventListener("abort", onAbort, { once: true });
+    signalA.addEventListener("abort", handleA, { once: true });
+    signalB.addEventListener("abort", handleB, { once: true });
   }
   return controller.signal;
 }
@@ -230,13 +295,32 @@ function errorMessage(data: unknown, fallback: string): string {
   if (typeof data === "string" && data) return data;
   if (data && typeof data === "object") {
     const record = data as Record<string, unknown>;
-    if (typeof record["detail"] === "string") return record["detail"];
-    if (Array.isArray(record["detail"])) return "Validation error";
-    if (typeof record["message"] === "string") return record["message"];
-    if (typeof record["error"] === "string") return record["error"];
+    if (typeof record["detail"] === "string" && record["detail"]) return record["detail"];
+    if (Array.isArray(record["detail"])) {
+      const messages = record["detail"]
+        .map((item) => {
+          if (item && typeof item === "object") {
+            const err = item as Record<string, unknown>;
+            const loc = Array.isArray(err["loc"]) ? err["loc"].join(".") : "";
+            const msg = typeof err["msg"] === "string" ? err["msg"] : "";
+            return loc && msg ? `${loc}: ${msg}` : msg || JSON.stringify(item);
+          }
+          return String(item);
+        })
+        .filter(Boolean);
+      return messages.length > 0 ? `Validation error: ${messages.join("; ")}` : "Validation error";
+    }
+    if (typeof record["message"] === "string" && record["message"]) return record["message"];
+    if (typeof record["error"] === "string" && record["error"]) return record["error"];
+    if (typeof record["title"] === "string" && record["title"]) return record["title"];
+    if (Array.isArray(record["errors"])) {
+      return `Errors: ${record["errors"].map((e) => (typeof e === "string" ? e : JSON.stringify(e))).join("; ")}`;
+    }
   }
   return fallback;
 }
+
+const BINARY_CONTENT_TYPE = /^(image|audio|video)\/|application\/(octet-stream|pdf|zip|gzip|vnd\.|x-)/;
 
 async function readBody(response: Response): Promise<unknown> {
   const contentType = response.headers.get("content-type") ?? "";
@@ -249,8 +333,48 @@ async function readBody(response: Response): Promise<unknown> {
       ? response.body.pipeThrough(new TextDecoderStream())
       : response.body;
   }
+  if (BINARY_CONTENT_TYPE.test(contentType)) {
+    return response.blob();
+  }
   if (contentType === "" || contentType.startsWith("text/")) return response.text();
   return response.blob();
+}
+
+async function readErrorBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get("content-type") ?? "";
+  try {
+    const text = await response.text();
+    if (!text) {
+      return { message: response.statusText || `HTTP ${response.status}` };
+    }
+    if (
+      contentType.includes("application/json") ||
+      contentType.includes("+json") ||
+      (text.startsWith("{") && text.endsWith("}")) ||
+      (text.startsWith("[") && text.endsWith("]"))
+    ) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        // Fallback to text message
+      }
+    }
+    return { message: text };
+  } catch {
+    return { message: response.statusText || `HTTP ${response.status}` };
+  }
+}
+
+function retryDelay(attempt: number, baseDelay: number, res?: Response): number {
+  const retryAfter = res ? res.headers.get("Retry-After") : null;
+  if (retryAfter) {
+    const seconds = parseInt(retryAfter, 10);
+    if (!isNaN(seconds)) return Math.max(0, seconds * 1000);
+    const dateMs = Date.parse(retryAfter);
+    if (!isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
+  }
+  const maxDelay = baseDelay * Math.pow(2, attempt - 1);
+  return Math.floor(Math.random() * maxDelay);
 }
 
 export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOptions = {}): NinjaClient {
@@ -296,15 +420,27 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
 
     const init: RequestInit = { method, headers };
     if (options.body !== undefined) {
-      const encoding = BODY_ENCODINGS[endpoint] ?? "json";
+      let encoding = BODY_ENCODINGS[endpoint] ?? "json";
+      if (encoding === "json" && hasBlobValue(options.body)) {
+        encoding = "multipart";
+      }
+
       if (isBodyInit(options.body)) {
         init.body = options.body;
-      } else if (encoding === "raw" && typeof options.body === "string") {
-        init.body = options.body;
+        if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+          headers.delete("Content-Type");
+        }
+      } else if (encoding === "raw") {
+        if (typeof options.body === "string" || isBodyInit(options.body)) {
+          init.body = options.body as BodyInit;
+        } else {
+          init.body = String(options.body);
+        }
       } else if (encoding === "multipart") {
         const form = new FormData();
         for (const [key, value] of toEntries(options.body)) form.append(key, value);
         init.body = form;
+        headers.delete("Content-Type");
       } else if (encoding === "form") {
         const form = new URLSearchParams();
         for (const [key, value] of toEntries(options.body)) {
@@ -340,14 +476,20 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
       (init as Record<string, unknown>)["duplex"] = duplex;
     }
 
+    const context: RequestContext = { endpoint, url };
+
     if (clientOptions.onRequest) {
-      await clientOptions.onRequest(endpoint, init);
+      await clientOptions.onRequest(endpoint, init, context);
+    }
+    if (options.onRequest) {
+      await options.onRequest(endpoint, init, context);
     }
 
     const retryOpt = options.retry ?? clientOptions.retry;
     let maxAttempts = 1;
     let baseDelay = 300;
     let retryStatuses = [408, 429, 500, 502, 503, 504];
+    let retryMethods = DEFAULT_RETRY_METHODS;
 
     if (typeof retryOpt === "number" && retryOpt > 0) {
       maxAttempts = 1 + retryOpt;
@@ -361,6 +503,13 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
       if (Array.isArray(retryOpt.statusCodes)) {
         retryStatuses = retryOpt.statusCodes;
       }
+      if (Array.isArray(retryOpt.methods)) {
+        retryMethods = retryOpt.methods.map((m) => m.toUpperCase());
+      }
+    }
+
+    if (!retryMethods.includes(method.toUpperCase())) {
+      maxAttempts = 1;
     }
 
     const fetchFn = clientOptions.fetch ?? globalThis.fetch.bind(globalThis);
@@ -378,17 +527,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
           (!init.signal || !init.signal.aborted)
         ) {
           attempt++;
-          let delay = baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
-          const retryAfter = res.headers.get("Retry-After");
-          if (retryAfter) {
-            const seconds = parseInt(retryAfter, 10);
-            if (!isNaN(seconds)) {
-              delay = seconds * 1000;
-            } else {
-              const dateMs = Date.parse(retryAfter);
-              if (!isNaN(dateMs)) delay = Math.max(0, dateMs - Date.now());
-            }
-          }
+          const delay = retryDelay(attempt, baseDelay, res);
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
@@ -399,14 +538,16 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
           (!init.signal || !init.signal.aborted)
         ) {
           attempt++;
-          const delay = baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
+          const delay = retryDelay(attempt, baseDelay);
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
+        const err = networkError instanceof Error ? networkError : new Error(String(networkError));
+        if (options.onError) {
+          await options.onError(err, context);
+        }
         if (clientOptions.onError) {
-          await clientOptions.onError(
-            networkError instanceof Error ? networkError : new Error(String(networkError))
-          );
+          await clientOptions.onError(err, context);
         }
         throw networkError;
       }
@@ -414,19 +555,25 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
 
     const response = lastResponse!;
 
+    if (options.onResponse) {
+      await options.onResponse(response, context);
+    }
     if (clientOptions.onResponse) {
-      await clientOptions.onResponse(response);
+      await clientOptions.onResponse(response, context);
     }
 
     if (!response.ok) {
-      const data = await readBody(response).catch(() => undefined);
+      const data = await readErrorBody(response);
       const apiError = new NinjaApiError(
         response,
         data,
         errorMessage(data, response.statusText || `HTTP ${response.status}`)
       );
+      if (options.onError) {
+        await options.onError(apiError, context);
+      }
       if (clientOptions.onError) {
-        await clientOptions.onError(apiError);
+        await clientOptions.onError(apiError, context);
       }
       throw apiError;
     }
