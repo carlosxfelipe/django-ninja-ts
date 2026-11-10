@@ -34,6 +34,28 @@ pip install "git+https://github.com/carlosxfelipe/django-ninja-ts.git#subdirecto
 
 > **Requirements:** Python 3.12+, Django 6.0+, and Django Ninja 1.8.0+ (automatically installed as dependencies if not already present in your project).
 
+### Django Configuration
+
+1. **Register the app in `settings.py`** (required for management commands like `generate_ts_sdk`):
+
+```python
+INSTALLED_APPS = [
+    ...,
+    "ninja_ts",
+]
+
+# Optional: dotted path to your NinjaAPI instance (auto-discovered if you only have one)
+NINJA_TS_API = "config.api.api"
+```
+
+2. **Serve the SDK in development (optional)** — in your `api.py`, after registering routers:
+
+```python
+import ninja_ts
+
+ninja_ts.install(api)  # Exposes GET /api/sdk.ts and /api/types.d.ts when DEBUG=True
+```
+
 ## 🚀 Quickstart
 
 ### 1. Development & Demo Setup
