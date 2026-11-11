@@ -130,6 +130,13 @@ export interface NinjaRetryConfig {
   methods?: string[];
 }
 
+/** The RequestInit handed to fetch (headers are always a Headers instance). */
+export interface NinjaRequestInit extends RequestInit {
+  headers: Headers;
+  next?: NextFetchRequestConfig;
+  duplex?: "half";
+}
+
 export interface BaseRequestOptions {
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
@@ -140,7 +147,7 @@ export interface BaseRequestOptions {
   timeoutMs?: number;
   retry?: number | NinjaRetryConfig;
   /** Hook invoked before this request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
-  onRequest?: (endpoint: string, init: RequestInit, context: RequestContext) => Promise<void> | void;
+  onRequest?: (endpoint: string, init: NinjaRequestInit, context: RequestContext) => Promise<void> | void;
   /** Hook invoked after a response is received for this request. */
   onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
   /** Hook invoked when an error occurs for this request. */
@@ -164,7 +171,7 @@ export interface NinjaClientOptions {
   /** Default retry policy for failed requests (network errors or retryable status codes). */
   retry?: number | NinjaRetryConfig;
   /** Hook invoked before each request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
-  onRequest?: (endpoint: string, init: RequestInit, context: RequestContext) => Promise<void> | void;
+  onRequest?: (endpoint: string, init: NinjaRequestInit, context: RequestContext) => Promise<void> | void;
   /** Hook invoked after a response is received, before error handling or body parsing. */
   onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
   /** Hook invoked when an error occurs (network failure or non-2xx HTTP response). */
@@ -315,13 +322,18 @@ function combineSignals(signalA?: AbortSignal, signalB?: AbortSignal): AbortSign
   }
   if (typeof AbortController === "undefined") return signalA;
   const controller = new AbortController();
-  const onAbort = (sig: AbortSignal) => {
-    controller.abort(sig.reason);
+  const cleanup = () => {
     signalA.removeEventListener("abort", handleA);
     signalB.removeEventListener("abort", handleB);
   };
-  const handleA = () => onAbort(signalA);
-  const handleB = () => onAbort(signalB);
+  const handleA = () => {
+    cleanup();
+    controller.abort(signalA.reason);
+  };
+  const handleB = () => {
+    cleanup();
+    controller.abort(signalB.reason);
+  };
   if (signalA.aborted) {
     controller.abort(signalA.reason);
   } else if (signalB.aborted) {
@@ -384,26 +396,33 @@ async function readBody(response: Response): Promise<unknown> {
 
 async function readErrorBody(response: Response): Promise<unknown> {
   const contentType = response.headers.get("content-type") ?? "";
+  const fallback = { message: response.statusText || `HTTP ${response.status}` };
   try {
-    const text = await response.text();
-    if (!text) {
-      return { message: response.statusText || `HTTP ${response.status}` };
-    }
-    if (
-      contentType.includes("application/json") ||
-      contentType.includes("+json") ||
-      (text.startsWith("{") && text.endsWith("}")) ||
-      (text.startsWith("[") && text.endsWith("]"))
-    ) {
-      try {
-        return JSON.parse(text);
-      } catch {
-        // Fallback to text message
+    if (typeof response.text === "function") {
+      const text = await response.text();
+      if (!text) {
+        return fallback;
       }
+      if (
+        contentType.includes("application/json") ||
+        contentType.includes("+json") ||
+        (text.startsWith("{") && text.endsWith("}")) ||
+        (text.startsWith("[") && text.endsWith("]"))
+      ) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          // Fallback to text message
+        }
+      }
+      return { message: text };
     }
-    return { message: text };
+    if (typeof response.json === "function") {
+      return await response.json();
+    }
+    return fallback;
   } catch {
-    return { message: response.statusText || `HTTP ${response.status}` };
+    return fallback;
   }
 }
 
@@ -415,8 +434,7 @@ function retryDelay(attempt: number, baseDelay: number, res?: Response): number 
     const dateMs = Date.parse(retryAfter);
     if (!isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
   }
-  const maxDelay = baseDelay * Math.pow(2, attempt - 1);
-  return Math.floor(Math.random() * maxDelay);
+  return baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
 }
 
 export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOptions = {}): NinjaClient {
@@ -460,7 +478,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
       for (const [key, value] of Object.entries(options.headers)) headers.set(key, String(value));
     }
 
-    const init: RequestInit = { method, headers };
+    const init: NinjaRequestInit = { method, headers };
     if (options.body !== undefined) {
       let encoding = BODY_ENCODINGS[endpoint] ?? "json";
       if (encoding === "json" && hasBlobValue(options.body)) {
@@ -509,13 +527,13 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
         ? { ...clientOptions.next, ...options.next }
         : undefined;
     if (nextConfig) {
-      (init as Record<string, unknown>)["next"] = nextConfig;
+      init.next = nextConfig;
     }
 
     const duplex =
       options.duplex ?? (isReadableStream(init.body) ? "half" : undefined);
     if (duplex) {
-      (init as Record<string, unknown>)["duplex"] = duplex;
+      init.duplex = duplex;
     }
 
     const context: RequestContext = { endpoint, url };

@@ -101,7 +101,7 @@ def test_nextjs_caching_and_duplex_types(types, sdk):
     assert "next?: NextFetchRequestConfig;" in types
     assert 'duplex?: "half";' in types
     assert 'options.duplex ?? (isReadableStream(init.body) ? "half" : undefined)' in sdk
-    assert '(init as Record<string, unknown>)["duplex"] = duplex;' in sdk
+    assert "if (duplex) {\n      init.duplex = duplex;\n    }" in sdk
 
 
 def test_path_param_types_come_from_annotations(types):
@@ -117,8 +117,10 @@ def test_wildcard_catch_all_path_param(types):
 
 
 def test_client_lifecycle_hooks(types, sdk):
+    assert "export interface NinjaRequestInit extends RequestInit {" in types
+    assert "headers: Headers;" in types
     assert (
-        "onRequest?: (endpoint: string, init: RequestInit, context: RequestContext) => Promise<void> | void;"
+        "onRequest?: (endpoint: string, init: NinjaRequestInit, context: RequestContext) => Promise<void> | void;"
         in types
     )
     assert (
@@ -280,6 +282,31 @@ def test_generate_from_raw_dict_via_public_api():
     assert "export interface NinjaEndpoints {\n}" in ninja_ts.generate_sdk(openapi)
 
 
+def test_schema_jsdoc_and_date_time_inference():
+    openapi = {
+        "openapi": "3.1.0",
+        "info": {"title": "DocTest"},
+        "paths": {},
+        "components": {
+            "schemas": {
+                "EventItem": {
+                    "type": "object",
+                    "title": "A single event item in the audit log",
+                    "properties": {
+                        "created_at": {"type": "string", "title": "created_at"},
+                        "updated_at": {"type": "string", "title": "updated_at"},
+                        "timestamp": {"type": "string"},
+                        "scheduled_time": {"type": "string", "format": "date-time"},
+                    },
+                }
+            }
+        },
+    }
+    ts = TypeScriptGenerator(openapi).generate_types()
+    assert "A single event item in the audit log" in ts
+    assert "@format date-time" in ts
+
+
 # --------------------------------------------------------------------------- Django integration
 
 
@@ -335,6 +362,9 @@ def test_ninja_api_error_headers_and_timeout_types(types, sdk):
     assert "timeoutMs?: number;" in types
     assert "createTimeoutSignal(timeoutMs)" in sdk
     assert "combineSignals(options.signal, timeoutSignal)" in sdk
+    assert "const cleanup = () => {" in sdk
+    assert 'signalA.removeEventListener("abort", handleA);' in sdk
+    assert 'signalB.removeEventListener("abort", handleB);' in sdk
 
 
 def test_retry_config_types_and_runtime(types, sdk):
@@ -355,6 +385,7 @@ def test_retry_config_types_and_runtime(types, sdk):
     )
     assert 'res.headers.get("Retry-After")' in sdk
     assert "Math.random()" in sdk
+    assert "0.5 + Math.random() * 0.5" in sdk
     assert "Date.parse(retryAfter)" in sdk
 
 
@@ -444,6 +475,7 @@ import {
   type ResponseError,
   type NextFetchRequestConfig,
   type NinjaRetryConfig,
+  type NinjaRequestInit,
   type RequestContext,
   type NinjaValidationError,
 } from "./api";
@@ -460,9 +492,8 @@ const api = createNinjaClient("http://localhost:8000", {
   next: nextConfig,
   timeoutMs: 5000,
   retry: retryPolicy,
-  onRequest(endpoint, init, context) {
-    init.headers = new Headers(init.headers);
-    (init.headers as Headers).set("X-Client-Hook", "active");
+  onRequest(endpoint, init: NinjaRequestInit, context) {
+    init.headers.set("X-Client-Hook", "active");
     console.log("Sending", context.url);
   },
   onResponse(res, context) {

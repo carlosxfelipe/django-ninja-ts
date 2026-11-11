@@ -4,6 +4,7 @@
  * @typedef {import("../sdk/api").TodoOut} TodoResponse
  * @typedef {import("../sdk/api").TodoIn} CreateTodoRequest
  * @typedef {import("../sdk/api").NinjaClient} NinjaClient
+ * @typedef {import("../sdk/api").NinjaRequestInit} NinjaRequestInit
  * @typedef {import("../sdk/api").RequestContext} RequestContext
  */
 
@@ -107,14 +108,18 @@ function combineSignals(signalA, signalB) {
   }
   if (typeof AbortController === "undefined") return signalA;
   const controller = new AbortController();
-  /** @param {AbortSignal} sig */
-  const onAbort = (sig) => {
-    controller.abort(sig.reason);
+  const cleanup = () => {
     signalA.removeEventListener("abort", handleA);
     signalB.removeEventListener("abort", handleB);
   };
-  const handleA = () => onAbort(signalA);
-  const handleB = () => onAbort(signalB);
+  const handleA = () => {
+    cleanup();
+    controller.abort(signalA.reason);
+  };
+  const handleB = () => {
+    cleanup();
+    controller.abort(signalB.reason);
+  };
   if (signalA.aborted) {
     controller.abort(signalA.reason);
   } else if (signalB.aborted) {
@@ -220,26 +225,35 @@ async function readBody(response) {
  */
 async function readErrorBody(response) {
   const contentType = response.headers.get("content-type") ?? "";
+  const fallback = {
+    message: response.statusText || `HTTP ${response.status}`,
+  };
   try {
-    const text = await response.text();
-    if (!text) {
-      return { message: response.statusText || `HTTP ${response.status}` };
-    }
-    if (
-      contentType.includes("application/json") ||
-      contentType.includes("+json") ||
-      (text.startsWith("{") && text.endsWith("}")) ||
-      (text.startsWith("[") && text.endsWith("]"))
-    ) {
-      try {
-        return JSON.parse(text);
-      } catch {
-        // Fallback to text message
+    if (typeof response.text === "function") {
+      const text = await response.text();
+      if (!text) {
+        return fallback;
       }
+      if (
+        contentType.includes("application/json") ||
+        contentType.includes("+json") ||
+        (text.startsWith("{") && text.endsWith("}")) ||
+        (text.startsWith("[") && text.endsWith("]"))
+      ) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          // Fallback to text message
+        }
+      }
+      return { message: text };
     }
-    return { message: text };
+    if (typeof response.json === "function") {
+      return await response.json();
+    }
+    return fallback;
   } catch {
-    return { message: response.statusText || `HTTP ${response.status}` };
+    return fallback;
   }
 }
 
@@ -257,8 +271,7 @@ function retryDelay(attempt, baseDelay, res) {
     const dateMs = Date.parse(retryAfter);
     if (!isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
   }
-  const maxDelay = baseDelay * Math.pow(2, attempt - 1);
-  return Math.floor(Math.random() * maxDelay);
+  return baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
 }
 
 /**
@@ -329,7 +342,7 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
         }
       }
 
-      /** @type {RequestInit} */
+      /** @type {NinjaRequestInit} */
       const init = { method, headers };
 
       if (options.body !== undefined) {

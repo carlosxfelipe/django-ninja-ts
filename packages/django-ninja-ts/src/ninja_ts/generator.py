@@ -339,8 +339,13 @@ class TypeScriptGenerator:
             lines.append(f"@example {_literal(prop['example'])}")
         if "default" in prop:
             lines.append(f"@default {_literal(prop['default'])}")
-        if prop.get("format") and prop.get("format") != "binary":
-            lines.append(f"@format {prop['format']}")
+        format_ = prop.get("format")
+        if not format_ and prop.get("type") == "string":
+            name = prop.get("title", "").lower()
+            if name in ("created_at", "updated_at", "timestamp"):
+                format_ = "date-time"
+        if format_ and format_ != "binary":
+            lines.append(f"@format {format_}")
         if prop.get("deprecated"):
             lines.append("@deprecated")
         return lines
@@ -349,10 +354,12 @@ class TypeScriptGenerator:
         schema = self.schemas[raw]
         name = self._names[raw]
         response = raw in self._response_only
-        doc = _jsdoc(
-            _doc_lines(schema.get("description") if isinstance(schema, dict) else None),
-            "",
-        )
+        desc = schema.get("description") if isinstance(schema, dict) else None
+        if not desc and isinstance(schema, dict):
+            title = schema.get("title")
+            if title and title != name and title != raw and " " in title:
+                desc = title
+        doc = _jsdoc(_doc_lines(desc), "")
 
         is_plain_object = (
             isinstance(schema, dict)
