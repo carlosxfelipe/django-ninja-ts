@@ -118,11 +118,9 @@ def test_wildcard_catch_all_path_param(types):
 
 def test_client_lifecycle_hooks(types, sdk):
     assert "export interface NinjaRequestInit extends RequestInit {" in types
+    assert "export interface NinjaRequestConfig {" in types
     assert "headers: Headers;" in types
-    assert (
-        "onRequest?: (endpoint: string, init: NinjaRequestInit, context: RequestContext) => Promise<void> | void;"
-        in types
-    )
+    assert "onRequest?: (config: NinjaRequestConfig) => Promise<void> | void;" in types
     assert (
         "onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;"
         in types
@@ -132,9 +130,9 @@ def test_client_lifecycle_hooks(types, sdk):
         in types
     )
     assert "if (clientOptions.onRequest) {" in sdk
-    assert "await clientOptions.onRequest(endpoint, init, context);" in sdk
+    assert "await clientOptions.onRequest({ endpoint, url, init });" in sdk
     assert "if (options.onRequest) {" in sdk
-    assert "await options.onRequest(endpoint, init, context);" in sdk
+    assert "await options.onRequest({ endpoint, url, init });" in sdk
     assert "if (clientOptions.onResponse) {" in sdk
     assert "await clientOptions.onResponse(response, context);" in sdk
     assert "if (options.onResponse) {" in sdk
@@ -476,6 +474,7 @@ import {
   type NextFetchRequestConfig,
   type NinjaRetryConfig,
   type NinjaRequestInit,
+  type NinjaRequestConfig,
   type RequestContext,
   type NinjaValidationError,
 } from "./api";
@@ -489,12 +488,13 @@ const retryPolicy: NinjaRetryConfig = {
 const nextConfig: NextFetchRequestConfig = { revalidate: 60, tags: ["global"] };
 const api = createNinjaClient("http://localhost:8000", {
   headers: async () => ({ Authorization: "Bearer x" }),
+  cache: "no-store",
   next: nextConfig,
   timeoutMs: 5000,
   retry: retryPolicy,
-  onRequest(endpoint, init: NinjaRequestInit, context) {
-    init.headers.set("X-Client-Hook", "active");
-    console.log("Sending", context.url);
+  onRequest(config: NinjaRequestConfig) {
+    config.init.headers.set("X-Client-Hook", "active");
+    console.log("Sending", config.url);
   },
   onResponse(res, context) {
     if (!res.ok) console.warn("Request failed with status", res.status, context.endpoint);
@@ -509,8 +509,8 @@ async function main(): Promise<void> {
     next: { revalidate: 30, tags: ["todos"] },
     timeoutMs: 2000,
     retry: 3,
-    onRequest(endpoint, _init, ctx) {
-      console.log("Per request hook for", endpoint, ctx.url);
+    onRequest(config) {
+      console.log("Per request hook for", config.endpoint, config.url);
     },
     onResponse(res, ctx) {
       console.log("Per request response for", ctx.endpoint, res.status);
@@ -612,6 +612,125 @@ def test_generated_code_type_checks_with_tsc(tmp_path: Path, sdk: str, types: st
     (tmp_path / "types.d.ts").write_text(types)
     result = subprocess.run(
         [*TSC_CMD, *flags, "types.d.ts"],
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+node_path = shutil.which("node")
+
+
+@pytest.mark.skipif(not node_path, reason="Node.js not on PATH")
+def test_runtime_hooks_cache_and_read_body(tmp_path: Path, sdk: str):
+    assert node_path is not None
+    (tmp_path / "api.ts").write_text(sdk)
+    runner = """
+import assert from "node:assert/strict";
+import { createNinjaClient } from "./api.ts";
+
+const order = [];
+let seenCache;
+
+const client = createNinjaClient("https://example.test", {
+  cache: "no-store",
+  onRequest({ endpoint, url, init }) {
+    order.push("client:req");
+    assert.equal(endpoint, "GET /api/todos");
+    assert.equal(url, "https://example.test/api/todos");
+    init.headers.set("X-Test", "1");
+  },
+  onResponse() {
+    order.push("client:res");
+  },
+  onError() {
+    order.push("client:err");
+  },
+  async fetch(_url, init) {
+    seenCache = init.cache;
+    if (init.headers.get("X-Fail") === "1") {
+      return {
+        ok: false,
+        status: 500,
+        statusText: "Server Error",
+        headers: new Headers({ "content-type": "application/json" }),
+        async text() {
+          return JSON.stringify({ detail: "boom" });
+        },
+      };
+    }
+    if (init.headers.get("X-Xml") === "1") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "content-type": "application/xml" }),
+        async text() {
+          return "<ok/>";
+        },
+      };
+    }
+    if (init.headers.get("X-Partial-Json") === "1") {
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "content-type": "application/json" }),
+        async json() {
+          return [{ id: "1" }];
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 204,
+      statusText: "No Content",
+      headers: new Headers(),
+    };
+  },
+});
+
+const res204 = await client.fetch("GET /api/todos", {
+  onRequest() {
+    order.push("req:req");
+  },
+  onResponse() {
+    order.push("req:res");
+  },
+});
+assert.equal(res204, undefined);
+assert.equal(seenCache, "no-store");
+assert.deepEqual(order, ["client:req", "req:req", "client:res", "req:res"]);
+
+order.length = 0;
+await assert.rejects(
+  () =>
+    client.fetch("GET /api/todos", {
+      cache: "reload",
+      headers: { "X-Fail": "1" },
+      onResponse() {
+        order.push("req:res");
+      },
+      onError() {
+        order.push("req:err");
+      },
+    }),
+  /boom/,
+);
+assert.equal(seenCache, "reload");
+assert.deepEqual(order, ["client:req", "client:res", "req:res", "client:err", "req:err"]);
+
+const xml = await client.fetch("GET /api/todos", { headers: { "X-Xml": "1" } });
+assert.equal(xml, "<ok/>");
+
+const partialJson = await client.fetch("GET /api/todos", { headers: { "X-Partial-Json": "1" } });
+assert.deepEqual(partialJson, [{ id: "1" }]);
+"""
+    (tmp_path / "runner.mts").write_text(runner)
+    result = subprocess.run(
+        [node_path, "--experimental-strip-types", "runner.mts"],
         check=False,
         cwd=tmp_path,
         capture_output=True,

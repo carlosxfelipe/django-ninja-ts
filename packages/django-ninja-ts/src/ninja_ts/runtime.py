@@ -22,6 +22,7 @@ EXPORTED_NAMES = (
     "RequestOptions",
     "BaseRequestOptions",
     "NinjaRequestInit",
+    "NinjaRequestConfig",
     "NextFetchRequestConfig",
     "NinjaRetryConfig",
     "DEFAULT_RETRY_METHODS",
@@ -84,6 +85,12 @@ export interface NinjaRequestInit extends RequestInit {
   duplex?: "half";
 }
 
+export interface NinjaRequestConfig {
+  endpoint: string;
+  url: string;
+  init: NinjaRequestInit;
+}
+
 export interface BaseRequestOptions {
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
@@ -93,8 +100,8 @@ export interface BaseRequestOptions {
   duplex?: "half";
   timeoutMs?: number;
   retry?: number | NinjaRetryConfig;
-  /** Hook invoked before this request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
-  onRequest?: (endpoint: string, init: NinjaRequestInit, context: RequestContext) => Promise<void> | void;
+  /** Hook invoked before this request is sent. Can mutate `config.init` (e.g. inject headers) or perform logging. */
+  onRequest?: (config: NinjaRequestConfig) => Promise<void> | void;
   /** Hook invoked after a response is received for this request. */
   onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
   /** Hook invoked when an error occurs for this request. */
@@ -109,6 +116,8 @@ export interface NinjaClientOptions {
   /** Static headers, or a (sync/async) callback evaluated on every request (e.g. JWT). */
   headers?: Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>);
   credentials?: RequestCredentials;
+  /** Default Fetch API cache mode. */
+  cache?: RequestCache;
   /** Custom fetch implementation (defaults to the global fetch). */
   fetch?: typeof fetch;
   /** Default Next.js App Router cache configuration (revalidate / tags). */
@@ -117,8 +126,8 @@ export interface NinjaClientOptions {
   timeoutMs?: number;
   /** Default retry policy for failed requests (network errors or retryable status codes). */
   retry?: number | NinjaRetryConfig;
-  /** Hook invoked before each request is sent. Can mutate `init` (e.g. inject headers) or perform logging. */
-  onRequest?: (endpoint: string, init: NinjaRequestInit, context: RequestContext) => Promise<void> | void;
+  /** Hook invoked before each request is sent. Can mutate `config.init` (e.g. inject headers) or perform logging. */
+  onRequest?: (config: NinjaRequestConfig) => Promise<void> | void;
   /** Hook invoked after a response is received, before error handling or body parsing. */
   onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
   /** Hook invoked when an error occurs (network failure or non-2xx HTTP response). */
@@ -341,21 +350,33 @@ function errorMessage(data: unknown, fallback: string): string {
 const BINARY_CONTENT_TYPE = /^(image|audio|video)\/|application\/(octet-stream|pdf|zip|gzip|vnd\.|x-)/;
 
 async function readBody(response: Response): Promise<unknown> {
+  if (response.status === 204 || response.status === 205 || response.headers.get("content-length") === "0") {
+    return undefined;
+  }
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("application/json") || contentType.includes("+json")) {
-    const text = await response.text();
-    return text ? JSON.parse(text) : undefined;
+    if (typeof response.text === "function") {
+      const text = await response.text();
+      return text ? JSON.parse(text) : undefined;
+    }
+    return response.json();
   }
   if (contentType.includes("text/event-stream") && response.body) {
     return typeof TextDecoderStream !== "undefined"
       ? response.body.pipeThrough(new TextDecoderStream())
       : response.body;
   }
-  if (BINARY_CONTENT_TYPE.test(contentType)) {
+  if (BINARY_CONTENT_TYPE.test(contentType) && typeof response.blob === "function") {
     return response.blob();
   }
-  if (contentType === "" || contentType.startsWith("text/")) return response.text();
-  return response.blob();
+  if (
+    (contentType === "" || contentType.startsWith("text/") || contentType.includes("xml")) &&
+    typeof response.text === "function"
+  ) {
+    return response.text();
+  }
+  if (typeof response.blob === "function") return response.blob();
+  return response.text();
 }
 
 async function readErrorBody(response: Response): Promise<unknown> {
@@ -401,29 +422,64 @@ function retryDelay(attempt: number, baseDelay: number, res?: Response): number 
   return baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
 }
 
+function resolvePath(endpoint: string, template: string, params: Record<string, unknown>): string {
+  return template.replace(/\{([^}]+)\}/g, (_match, rawName: string) => {
+    const isCatchAll = rawName.startsWith("+") || rawName.endsWith("*");
+    const name = rawName.replace(/^\+/, "").replace(/\*$/, "");
+    const value = params[name] ?? (name !== rawName ? params[rawName] : undefined);
+    if (value === undefined || value === null) {
+      throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
+    }
+    if (Array.isArray(value)) {
+      return value.map((seg) => encodeURIComponent(String(seg))).join("/");
+    }
+    const str = String(value);
+    if (isCatchAll || str.includes("/")) {
+      return str.split("/").map((seg) => encodeURIComponent(seg)).join("/");
+    }
+    return encodeURIComponent(str);
+  });
+}
+
+function encodeBody(endpoint: string, body: unknown, headers: Headers): BodyInit {
+  let encoding = BODY_ENCODINGS[endpoint] ?? "json";
+  if (encoding === "json" && hasBlobValue(body)) {
+    encoding = "multipart";
+  }
+
+  if (isBodyInit(body)) {
+    if (typeof FormData !== "undefined" && body instanceof FormData) {
+      headers.delete("Content-Type");
+    }
+    return body;
+  }
+  if (encoding === "raw") {
+    return typeof body === "string" || isBodyInit(body) ? (body as BodyInit) : String(body);
+  }
+  if (encoding === "multipart") {
+    const form = new FormData();
+    for (const [key, value] of toEntries(body)) form.append(key, value);
+    headers.delete("Content-Type");
+    return form;
+  }
+  if (encoding === "form") {
+    const form = new URLSearchParams();
+    for (const [key, value] of toEntries(body)) {
+      if (typeof value === "string") form.append(key, value);
+    }
+    return form;
+  }
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  return JSON.stringify(body);
+}
+
 export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOptions = {}): NinjaClient {
   const root = baseUrl.replace(/\/+$/, "");
 
   async function request(endpoint: string, options: RawRequestOptions): Promise<unknown> {
     const separator = endpoint.indexOf(" ");
     const method = endpoint.slice(0, separator);
-    const params = options.params ?? {};
-    const path = endpoint.slice(separator + 1).replace(/\{([^}]+)\}/g, (_match, rawName: string) => {
-      const isCatchAll = rawName.startsWith("+") || rawName.endsWith("*");
-      const name = rawName.replace(/^\+/, "").replace(/\*$/, "");
-      const value = params[name] ?? (name !== rawName ? params[rawName] : undefined);
-      if (value === undefined || value === null) {
-        throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
-      }
-      if (Array.isArray(value)) {
-        return value.map((seg) => encodeURIComponent(String(seg))).join("/");
-      }
-      const str = String(value);
-      if (isCatchAll || str.includes("/")) {
-        return str.split("/").map((seg) => encodeURIComponent(seg)).join("/");
-      }
-      return encodeURIComponent(str);
-    });
+    const path = resolvePath(endpoint, endpoint.slice(separator + 1), options.params ?? {});
 
     let url = root + path;
     if (options.query) {
@@ -444,37 +500,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
 
     const init: NinjaRequestInit = { method, headers };
     if (options.body !== undefined) {
-      let encoding = BODY_ENCODINGS[endpoint] ?? "json";
-      if (encoding === "json" && hasBlobValue(options.body)) {
-        encoding = "multipart";
-      }
-
-      if (isBodyInit(options.body)) {
-        init.body = options.body;
-        if (typeof FormData !== "undefined" && options.body instanceof FormData) {
-          headers.delete("Content-Type");
-        }
-      } else if (encoding === "raw") {
-        if (typeof options.body === "string" || isBodyInit(options.body)) {
-          init.body = options.body as BodyInit;
-        } else {
-          init.body = String(options.body);
-        }
-      } else if (encoding === "multipart") {
-        const form = new FormData();
-        for (const [key, value] of toEntries(options.body)) form.append(key, value);
-        init.body = form;
-        headers.delete("Content-Type");
-      } else if (encoding === "form") {
-        const form = new URLSearchParams();
-        for (const [key, value] of toEntries(options.body)) {
-          if (typeof value === "string") form.append(key, value);
-        }
-        init.body = form;
-      } else {
-        if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-        init.body = JSON.stringify(options.body);
-      }
+      init.body = encodeBody(endpoint, options.body, headers);
     }
     const credentials = options.credentials ?? clientOptions.credentials;
     if (credentials) init.credentials = credentials;
@@ -484,7 +510,8 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     const signal = combineSignals(options.signal, timeoutSignal);
     if (signal) init.signal = signal;
 
-    if (options.cache) init.cache = options.cache;
+    const cache = options.cache ?? clientOptions.cache;
+    if (cache) init.cache = cache;
 
     const nextConfig =
       clientOptions.next || options.next
@@ -503,10 +530,10 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     const context: RequestContext = { endpoint, url };
 
     if (clientOptions.onRequest) {
-      await clientOptions.onRequest(endpoint, init, context);
+      await clientOptions.onRequest({ endpoint, url, init });
     }
     if (options.onRequest) {
-      await options.onRequest(endpoint, init, context);
+      await options.onRequest({ endpoint, url, init });
     }
 
     const retryOpt = options.retry ?? clientOptions.retry;
@@ -567,11 +594,11 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
           continue;
         }
         const err = networkError instanceof Error ? networkError : new Error(String(networkError));
-        if (options.onError) {
-          await options.onError(err, context);
-        }
         if (clientOptions.onError) {
           await clientOptions.onError(err, context);
+        }
+        if (options.onError) {
+          await options.onError(err, context);
         }
         throw networkError;
       }
@@ -579,11 +606,11 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
 
     const response = lastResponse!;
 
-    if (options.onResponse) {
-      await options.onResponse(response, context);
-    }
     if (clientOptions.onResponse) {
       await clientOptions.onResponse(response, context);
+    }
+    if (options.onResponse) {
+      await options.onResponse(response, context);
     }
 
     if (!response.ok) {
@@ -593,16 +620,13 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
         data,
         errorMessage(data, response.statusText || `HTTP ${response.status}`)
       );
-      if (options.onError) {
-        await options.onError(apiError, context);
-      }
       if (clientOptions.onError) {
         await clientOptions.onError(apiError, context);
       }
+      if (options.onError) {
+        await options.onError(apiError, context);
+      }
       throw apiError;
-    }
-    if (response.status === 204 || response.status === 205 || response.headers.get("content-length") === "0") {
-      return undefined;
     }
     return readBody(response);
   }

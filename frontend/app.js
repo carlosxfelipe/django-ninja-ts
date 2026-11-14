@@ -198,25 +198,45 @@ const BINARY_CONTENT_TYPE =
  * @returns {Promise<unknown>}
  */
 async function readBody(response) {
+  if (
+    response.status === 204 ||
+    response.status === 205 ||
+    response.headers.get("content-length") === "0"
+  ) {
+    return undefined;
+  }
   const contentType = response.headers.get("content-type") ?? "";
   if (
     contentType.includes("application/json") ||
     contentType.includes("+json")
   ) {
-    const text = await response.text();
-    return text ? JSON.parse(text) : undefined;
+    if (typeof response.text === "function") {
+      const text = await response.text();
+      return text ? JSON.parse(text) : undefined;
+    }
+    return response.json();
   }
   if (contentType.includes("text/event-stream") && response.body) {
     return typeof TextDecoderStream !== "undefined"
       ? response.body.pipeThrough(new TextDecoderStream())
       : response.body;
   }
-  if (BINARY_CONTENT_TYPE.test(contentType)) {
+  if (
+    BINARY_CONTENT_TYPE.test(contentType) &&
+    typeof response.blob === "function"
+  ) {
     return response.blob();
   }
-  if (contentType === "" || contentType.startsWith("text/"))
+  if (
+    (contentType === "" ||
+      contentType.startsWith("text/") ||
+      contentType.includes("xml")) &&
+    typeof response.text === "function"
+  ) {
     return response.text();
-  return response.blob();
+  }
+  if (typeof response.blob === "function") return response.blob();
+  return response.text();
 }
 
 /**
@@ -275,6 +295,63 @@ function retryDelay(attempt, baseDelay, res) {
 }
 
 /**
+ * @param {string} endpoint
+ * @param {string} template
+ * @param {Record<string, unknown>} params
+ * @returns {string}
+ */
+function resolvePath(endpoint, template, params) {
+  return template.replace(/\{([^}]+)\}/g, (_match, rawName) => {
+    const isCatchAll =
+      rawName.startsWith("+") ||
+      rawName.endsWith("*") ||
+      rawName.startsWith("path:");
+    const name = rawName.replace(/^(\+|path:)/, "").replace(/\*$/, "");
+    const value =
+      params[name] ?? (name !== rawName ? params[rawName] : undefined);
+    if (value === undefined || value === null) {
+      throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
+    }
+    if (Array.isArray(value)) {
+      return /** @type {unknown[]} */ (value)
+        .map((/** @type {unknown} */ seg) => encodeURIComponent(String(seg)))
+        .join("/");
+    }
+    const str = String(value);
+    if (isCatchAll || str.includes("/")) {
+      return str
+        .split("/")
+        .map((/** @type {string} */ seg) => encodeURIComponent(seg))
+        .join("/");
+    }
+    return encodeURIComponent(str);
+  });
+}
+
+/**
+ * @param {any} body
+ * @param {Headers} headers
+ * @returns {BodyInit}
+ */
+function encodeBody(body, headers) {
+  const isFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
+  if (isFormData || hasBlobValue(body)) {
+    headers.delete("Content-Type");
+    if (isFormData) return body;
+    const form = new FormData();
+    for (const [key, val] of Object.entries(body)) {
+      form.append(key, /** @type {any} */ (val));
+    }
+    return form;
+  }
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  return JSON.stringify(body);
+}
+
+/**
  * Runtime implementation of createNinjaClient() matching packages/django-ninja-ts
  * @param {string} [baseUrl=""]
  * @param {import("../sdk/api").NinjaClientOptions} [clientOptions={}]
@@ -289,37 +366,11 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
       const options = /** @type {any} */ (args[0] || {});
       const separator = endpoint.indexOf(" ");
       const method = endpoint.slice(0, separator);
-      const params = options.params ?? {};
-
-      let path = endpoint
-        .slice(separator + 1)
-        .replace(/\{([^}]+)\}/g, (_match, rawName) => {
-          const isCatchAll =
-            rawName.startsWith("+") ||
-            rawName.endsWith("*") ||
-            rawName.startsWith("path:");
-          const name = rawName.replace(/^(\+|path:)/, "").replace(/\*$/, "");
-          const value =
-            params[name] ?? (name !== rawName ? params[rawName] : undefined);
-          if (value === undefined || value === null) {
-            throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
-          }
-          if (Array.isArray(value)) {
-            return /** @type {unknown[]} */ (value)
-              .map((/** @type {unknown} */ seg) =>
-                encodeURIComponent(String(seg)),
-              )
-              .join("/");
-          }
-          const str = String(value);
-          if (isCatchAll || str.includes("/")) {
-            return str
-              .split("/")
-              .map((/** @type {string} */ seg) => encodeURIComponent(seg))
-              .join("/");
-          }
-          return encodeURIComponent(str);
-        });
+      const path = resolvePath(
+        endpoint,
+        endpoint.slice(separator + 1),
+        options.params ?? {},
+      );
 
       let url = root + path;
       if (options.query) {
@@ -346,25 +397,7 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
       const init = { method, headers };
 
       if (options.body !== undefined) {
-        const isFormData =
-          typeof FormData !== "undefined" && options.body instanceof FormData;
-        if (isFormData || hasBlobValue(options.body)) {
-          if (isFormData) {
-            init.body = options.body;
-          } else {
-            const form = new FormData();
-            for (const [key, val] of Object.entries(options.body)) {
-              form.append(key, /** @type {any} */ (val));
-            }
-            init.body = form;
-          }
-          headers.delete("Content-Type");
-        } else {
-          if (!headers.has("Content-Type")) {
-            headers.set("Content-Type", "application/json");
-          }
-          init.body = JSON.stringify(options.body);
-        }
+        init.body = encodeBody(options.body, headers);
       }
 
       const timeoutMs = options.timeoutMs ?? clientOptions.timeoutMs;
@@ -375,6 +408,9 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
       if (options.credentials ?? clientOptions.credentials) {
         init.credentials = options.credentials ?? clientOptions.credentials;
       }
+
+      const cache = options.cache ?? clientOptions.cache;
+      if (cache) init.cache = cache;
 
       if (clientOptions.next || options.next) {
         // @ts-ignore
@@ -390,10 +426,10 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
       const context = { endpoint, url };
 
       if (clientOptions.onRequest) {
-        await clientOptions.onRequest(endpoint, init, context);
+        await clientOptions.onRequest({ endpoint, url, init });
       }
       if (options.onRequest) {
-        await options.onRequest(endpoint, init, context);
+        await options.onRequest({ endpoint, url, init });
       }
 
       /** @type {number | import("../sdk/api").NinjaRetryConfig | undefined} */
@@ -458,11 +494,11 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
             continue;
           }
           const errorObj = err instanceof Error ? err : new Error(String(err));
-          if (options.onError) {
-            await options.onError(errorObj, context);
-          }
           if (clientOptions.onError) {
             await clientOptions.onError(errorObj, context);
+          }
+          if (options.onError) {
+            await options.onError(errorObj, context);
           }
           throw err;
         }
@@ -470,11 +506,11 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
 
       const res = /** @type {Response} */ (lastRes);
 
-      if (options.onResponse) {
-        await options.onResponse(res, context);
-      }
       if (clientOptions.onResponse) {
         await clientOptions.onResponse(res, context);
+      }
+      if (options.onResponse) {
+        await options.onResponse(res, context);
       }
 
       if (!res.ok) {
@@ -484,22 +520,15 @@ function createNinjaClient(baseUrl = "", clientOptions = {}) {
           errData,
           errorMessage(errData, res.statusText || `HTTP ${res.status}`),
         );
-        if (options.onError) {
-          await options.onError(apiError, context);
-        }
         if (clientOptions.onError) {
           await clientOptions.onError(apiError, context);
+        }
+        if (options.onError) {
+          await options.onError(apiError, context);
         }
         throw apiError;
       }
 
-      if (
-        res.status === 204 ||
-        res.status === 205 ||
-        res.headers.get("content-length") === "0"
-      ) {
-        return /** @type {any} */ (undefined);
-      }
       return /** @type {any} */ (await readBody(res));
     },
   };
