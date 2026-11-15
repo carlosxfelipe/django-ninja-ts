@@ -1,4 +1,3 @@
-import ninja_ts
 from core.api import router as core_router
 from ninja.errors import ValidationError as NinjaValidationError
 from ninja_extra import NinjaExtraAPI
@@ -59,7 +58,3 @@ def validation_error_handler(request, exc: NinjaValidationError):
 # Register modular routers
 api.add_router("", core_router)
 api.add_router("/todos", todos_router)
-
-# Serve /api/sdk.ts and /api/types.d.ts (hidden from OpenAPI; only when DEBUG=True).
-# In production, export at build time: `python manage.py generate_ts_sdk -o <file>`.
-ninja_ts.install(api)

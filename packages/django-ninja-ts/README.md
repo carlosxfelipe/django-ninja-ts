@@ -26,32 +26,29 @@ NINJA_TS_API = "config.api.api"  # optional: dotted path to your NinjaAPI
 At build time / in CI (recommended):
 
 ```bash
-python manage.py generate_ts_sdk -o ../frontend/src/api.ts
-python manage.py generate_ts_sdk --types-only -o ../frontend/src/api.d.ts
+# Modular TypeScript SDK directory (index.ts, runtime.ts, types/, endpoints/)
+python manage.py generate_ts_sdk -o ../frontend/src/sdk
+
+# Verify generated SDK is up to date in CI
+python manage.py generate_ts_sdk -o ../frontend/src/sdk --check
 ```
+
+Use `--import-ext auto|none|.js|.ts` to control relative import extensions (`auto` inspects `deno.json`, `tsconfig.json`, and `package.json`). Unchanged files are preserved and stale generated `.ts` files are pruned automatically.
 
 Or from Python:
 
 ```python
 import ninja_ts
 
-ninja_ts.export_sdk(api, "frontend/src/api.ts")
-ninja_ts.export_types(api, "frontend/src/api.d.ts")
-code = ninja_ts.generate_sdk(api)  # str
-code = ninja_ts.generate_sdk(openapi_dict)  # any OpenAPI 3.x document
-```
-
-Or serve it during development (hidden from the OpenAPI schema, enabled only when `DEBUG=True`):
-
-```python
-# config/api.py — after registering routers, before urls.py reads api.urls
-ninja_ts.install(api)  # GET /api/sdk.ts and /api/types.d.ts
+ninja_ts.export_sdk(api, "frontend/src/sdk")
+files = ninja_ts.generate_sdk(api)  # dict[str, str]
+files = ninja_ts.generate_sdk(openapi_dict)  # any OpenAPI 3.x document
 ```
 
 ## Use it in the frontend
 
 ```typescript
-import { createNinjaClient, NinjaApiError } from "./api";
+import { createNinjaClient, isEndpointError } from "./sdk";
 
 const api = createNinjaClient("http://localhost:8000", {
   headers: async () => ({ Authorization: `Bearer ${await getToken()}` }),
@@ -66,7 +63,7 @@ const created = await api.fetch("POST /api/todos", {
 try {
   await api.fetch("GET /api/todos/{id}", { params: { id: "nope" } });
 } catch (err) {
-  if (err instanceof NinjaApiError) console.log(err.status, err.data);
+  if (isEndpointError(err, "GET /api/todos/{id}")) console.log(err.status, err.data);
 }
 ```
 

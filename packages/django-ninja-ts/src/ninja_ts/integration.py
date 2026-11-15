@@ -1,22 +1,23 @@
-"""Django Ninja integration: schema extraction, file export and optional HTTP routes."""
+"""Django Ninja integration: schema extraction and modular TypeScript SDK export/check."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ninja_ts.compat import ensure_ninja_extra_compat
-from ninja_ts.generator import TypeScriptGenerator
+from ninja_ts.generator import (
+    GENERATED_MARKER,
+    TypeScriptGenerator,
+    resolve_import_ext,
+)
 
 if TYPE_CHECKING:
     from ninja import NinjaAPI
 
     ApiOrSchema = NinjaAPI | dict[str, Any]
-
-TS_CONTENT_TYPE = "application/typescript; charset=utf-8"
-
-_UNSET: Any = object()
 
 
 def get_openapi_schema(
@@ -57,14 +58,42 @@ def _generator(api: ApiOrSchema, path_prefix: str | None) -> TypeScriptGenerator
     )
 
 
-def generate_types(api: ApiOrSchema, *, path_prefix: str | None = None) -> str:
-    """TypeScript declarations (``.d.ts``) for a NinjaAPI (or a raw OpenAPI dict)."""
-    return _generator(api, path_prefix).generate_types()
+@dataclass(frozen=True)
+class SdkSyncResult:
+    """Outcome of syncing a modular TypeScript SDK directory."""
+
+    directory: Path
+    written: tuple[str, ...]
+    unchanged: tuple[str, ...]
+    removed: tuple[str, ...]
+    import_ext: str
 
 
-def generate_sdk(api: ApiOrSchema, *, path_prefix: str | None = None) -> str:
-    """Standalone TypeScript SDK (``.ts``) for a NinjaAPI (or a raw OpenAPI dict)."""
-    return _generator(api, path_prefix).generate_sdk()
+class SdkDriftError(ValueError):
+    """Raised by ``check_sdk`` when generated SDK files are out of date."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing: tuple[str, ...] = (),
+        changed: tuple[str, ...] = (),
+        stale: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.missing = missing
+        self.changed = changed
+        self.stale = stale
+
+
+def generate_sdk(
+    api: ApiOrSchema,
+    *,
+    path_prefix: str | None = None,
+    import_ext: str = "",
+) -> dict[str, str]:
+    """Generate the modular TypeScript SDK mapping relative file paths to TypeScript contents."""
+    return _generator(api, path_prefix).generate_sdk(import_ext=import_ext)
 
 
 def _write(path: str | Path, content: str) -> Path:
@@ -74,116 +103,143 @@ def _write(path: str | Path, content: str) -> Path:
     return target
 
 
-def export_types(
-    api: ApiOrSchema, path: str | Path, *, path_prefix: str | None = None
-) -> Path:
-    """Write the ``.d.ts`` declarations to ``path`` (parent directories are created)."""
-    return _write(path, generate_types(api, path_prefix=path_prefix))
+def _scan_managed_ts_files(directory: Path) -> dict[str, str]:
+    """Return {posix_rel_path: content} for existing generated .ts files inside directory."""
+    managed: dict[str, str] = {}
+    if not directory.exists():
+        return managed
+    for path in sorted(directory.rglob("*.ts")):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if GENERATED_MARKER in text:
+            managed[path.relative_to(directory).as_posix()] = text
+    return managed
+
+
+def sync_sdk(
+    api: ApiOrSchema,
+    directory: str | Path,
+    *,
+    path_prefix: str | None = None,
+    import_ext: str = "auto",
+) -> SdkSyncResult:
+    """Sync modular SDK files into ``directory``, skipping unchanged and pruning stale files."""
+    target = Path(directory)
+    if target.exists() and not target.is_dir():
+        raise ValueError(f"{target} is not a directory.")
+
+    resolved_ext = resolve_import_ext(import_ext, target)
+    expected = generate_sdk(api, path_prefix=path_prefix, import_ext=resolved_ext)
+
+    for rel in expected:
+        dest = target / rel
+        if dest.exists():
+            if dest.is_dir():
+                raise ValueError(f"Expected file at {dest}, found directory.")
+            existing = dest.read_text(encoding="utf-8")
+            if GENERATED_MARKER not in existing:
+                raise ValueError(f"Refusing to overwrite unmanaged file: {dest}")
+
+    written: list[str] = []
+    unchanged: list[str] = []
+    for rel, content in sorted(expected.items()):
+        dest = target / rel
+        if dest.exists() and dest.read_text(encoding="utf-8") == content:
+            unchanged.append(rel)
+            continue
+        _write(dest, content)
+        written.append(rel)
+
+    removed: list[str] = []
+    for rel in sorted(_scan_managed_ts_files(target)):
+        if rel not in expected:
+            (target / rel).unlink()
+            removed.append(rel)
+
+    for subdir in ("types", "endpoints"):
+        subpath = target / subdir
+        if subpath.is_dir() and not any(subpath.iterdir()):
+            subpath.rmdir()
+
+    return SdkSyncResult(
+        directory=target,
+        written=tuple(written),
+        unchanged=tuple(unchanged),
+        removed=tuple(removed),
+        import_ext=resolved_ext,
+    )
 
 
 def export_sdk(
-    api: ApiOrSchema, path: str | Path, *, path_prefix: str | None = None
-) -> Path:
-    """Write the standalone SDK to ``path`` (parent directories are created)."""
-    return _write(path, generate_sdk(api, path_prefix=path_prefix))
-
-
-def install(
-    api: NinjaAPI,
+    api: ApiOrSchema,
+    directory: str | Path,
     *,
-    sdk_url: str | None = "/sdk.ts",
-    types_url: str | None = "/types.d.ts",
-    enabled: bool | None = None,
-    auth: Any = _UNSET,
-) -> None:
-    """Serve the SDK and declarations from the API itself (hidden from the OpenAPI schema).
-
-    Must be called before ``api.urls`` is evaluated (i.e. in the module defining the API).
-
-    - ``enabled`` defaults to ``settings.DEBUG``: in production prefer exporting the SDK at
-      build time (``manage.py generate_ts_sdk``) instead of exposing your API contract.
-    - ``auth`` is forwarded to Ninja (e.g. ``django_auth``); by default the API's auth applies.
-    - Pass ``None`` as ``sdk_url`` / ``types_url`` to skip one of the routes.
-    """
-    from django.conf import settings
-    from django.http import HttpResponse
-
-    if enabled is None:
-        enabled = bool(settings.DEBUG)
-    if not enabled:
-        return
-
-    route_kwargs: dict[str, Any] = {"include_in_schema": False}
-    if auth is not _UNSET:
-        route_kwargs["auth"] = auth
-
-    def respond(content: str) -> HttpResponse:
-        response = HttpResponse(content, content_type=TS_CONTENT_TYPE)
-        response["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-        response["Pragma"] = "no-cache"
-        response["X-Content-Type-Options"] = "nosniff"
-        return response
-
-    if sdk_url:
-
-        @api.get(sdk_url, url_name="ninja_ts_sdk", **route_kwargs)
-        def ninja_ts_sdk(request):
-            return respond(generate_sdk(api))
-
-    if types_url:
-
-        @api.get(types_url, url_name="ninja_ts_types", **route_kwargs)
-        def ninja_ts_types(request):
-            return respond(generate_types(api))
+    path_prefix: str | None = None,
+    import_ext: str = "auto",
+) -> Path:
+    """Write modular TypeScript SDK files into ``directory`` and prune stale generated files."""
+    return sync_sdk(
+        api, directory, path_prefix=path_prefix, import_ext=import_ext
+    ).directory
 
 
-def create_sdk_view(
-    api: ApiOrSchema, *, path_prefix: str | None = None, enabled: bool | None = None
-):
-    """Return a standard Django view that dynamically serves the TypeScript SDK.
+def check_sdk(
+    api: ApiOrSchema,
+    directory: str | Path,
+    *,
+    path_prefix: str | None = None,
+    import_ext: str = "auto",
+) -> SdkSyncResult:
+    """Verify ``directory`` matches the generated SDK; raise ``SdkDriftError`` on drift."""
+    target = Path(directory)
+    resolved_ext = resolve_import_ext(import_ext, target)
+    expected = generate_sdk(api, path_prefix=path_prefix, import_ext=resolved_ext)
 
-    Can be mounted directly in Django ``urlpatterns``:
-    ``path("api/sdk.ts", create_sdk_view(api))``
-    """
-    from django.conf import settings
-    from django.http import Http404, HttpRequest, HttpResponse
-
-    def sdk_view(request: HttpRequest) -> HttpResponse:
-        is_enabled = bool(settings.DEBUG) if enabled is None else bool(enabled)
-        if not is_enabled:
-            raise Http404("TypeScript SDK endpoint is disabled.")
-        response = HttpResponse(
-            generate_sdk(api, path_prefix=path_prefix), content_type=TS_CONTENT_TYPE
+    if not target.exists():
+        missing = tuple(sorted(expected))
+        raise SdkDriftError(
+            f"SDK directory {target} does not exist (missing {len(missing)} file(s)).",
+            missing=missing,
         )
-        response["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-        response["Pragma"] = "no-cache"
-        response["X-Content-Type-Options"] = "nosniff"
-        return response
+    if not target.is_dir():
+        raise SdkDriftError(f"{target} is not a directory.")
 
-    return sdk_view
+    missing: list[str] = []
+    changed: list[str] = []
+    unchanged: list[str] = []
+    for rel, content in sorted(expected.items()):
+        dest = target / rel
+        if not dest.exists():
+            missing.append(rel)
+        elif dest.is_dir() or dest.read_text(encoding="utf-8") != content:
+            changed.append(rel)
+        else:
+            unchanged.append(rel)
 
+    stale = tuple(
+        rel for rel in sorted(_scan_managed_ts_files(target)) if rel not in expected
+    )
 
-def create_types_view(
-    api: ApiOrSchema, *, path_prefix: str | None = None, enabled: bool | None = None
-):
-    """Return a standard Django view that dynamically serves TypeScript declarations (.d.ts).
-
-    Can be mounted directly in Django ``urlpatterns``:
-    ``path("api/types.d.ts", create_types_view(api))``
-    """
-    from django.conf import settings
-    from django.http import Http404, HttpRequest, HttpResponse
-
-    def types_view(request: HttpRequest) -> HttpResponse:
-        is_enabled = bool(settings.DEBUG) if enabled is None else bool(enabled)
-        if not is_enabled:
-            raise Http404("TypeScript types endpoint is disabled.")
-        response = HttpResponse(
-            generate_types(api, path_prefix=path_prefix), content_type=TS_CONTENT_TYPE
+    if missing or changed or stale:
+        parts = []
+        if missing:
+            parts.append(f"missing: {', '.join(missing)}")
+        if changed:
+            parts.append(f"changed: {', '.join(changed)}")
+        if stale:
+            parts.append(f"stale: {', '.join(stale)}")
+        raise SdkDriftError(
+            f"TypeScript SDK in {target} is out of date ({'; '.join(parts)}).",
+            missing=tuple(missing),
+            changed=tuple(changed),
+            stale=stale,
         )
-        response["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-        response["Pragma"] = "no-cache"
-        response["X-Content-Type-Options"] = "nosniff"
-        return response
 
-    return types_view
+    return SdkSyncResult(
+        directory=target,
+        written=(),
+        unchanged=tuple(unchanged),
+        removed=(),
+        import_ext=resolved_ext,
+    )

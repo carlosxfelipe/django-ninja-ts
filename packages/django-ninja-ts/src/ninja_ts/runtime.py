@@ -1,4 +1,4 @@
-"""TypeScript runtime templates emitted into the generated SDK / declarations.
+"""TypeScript runtime templates emitted into the generated modular SDK.
 
 Constraints for the TypeScript below (so the output works everywhere):
 - zero dependencies: only ``fetch``, ``Headers``, ``URLSearchParams``, ``FormData``;
@@ -6,6 +6,8 @@ Constraints for the TypeScript below (so the output works everywhere):
   directly with ``node file.ts`` (type stripping), Deno, Bun and any bundler;
 - compiles under ``strict`` and ``exactOptionalPropertyTypes``.
 """
+
+from __future__ import annotations
 
 EXPORTED_NAMES = (
     "NinjaEndpoints",
@@ -20,6 +22,7 @@ EXPORTED_NAMES = (
     "NinjaValidationError",
     "RequestContext",
     "RequestOptions",
+    "RequestOptionsFor",
     "BaseRequestOptions",
     "NinjaRequestInit",
     "NinjaRequestConfig",
@@ -27,22 +30,19 @@ EXPORTED_NAMES = (
     "NinjaRetryConfig",
     "DEFAULT_RETRY_METHODS",
     "BodyEncoding",
+    "BodyEncodingMap",
+    "NinjaEndpointDef",
     "NinjaClientOptions",
     "NinjaClient",
+    "NinjaClientFor",
     "NinjaApiError",
     "isNinjaApiError",
+    "isEndpointError",
     "createNinjaClient",
+    "createNinjaClientFor",
 )
 
-TYPES = r"""export type EndpointKey = keyof NinjaEndpoints;
-
-export type RequestParams<K extends EndpointKey> = NinjaEndpoints[K]["params"];
-export type RequestQuery<K extends EndpointKey> = NinjaEndpoints[K]["query"];
-export type RequestBody<K extends EndpointKey> = NinjaEndpoints[K]["body"];
-export type ResponseData<K extends EndpointKey> = NinjaEndpoints[K]["response"];
-export type ResponseError<K extends EndpointKey> = NinjaEndpoints[K]["error"];
-
-export interface NinjaHttpError {
+COMMON_TYPES = r"""export interface NinjaHttpError {
   detail: string;
 }
 
@@ -108,9 +108,26 @@ export interface BaseRequestOptions {
   onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;
 }
 
-export type RequestOptions<K extends EndpointKey> = NinjaEndpoints[K]["request"] & BaseRequestOptions;
-
 export type BodyEncoding = "json" | "form" | "multipart" | "raw";
+
+/** Request body encodings of endpoints that do not send JSON, keyed by "METHOD /path". */
+export type BodyEncodingMap = Readonly<Record<string, BodyEncoding | undefined>>;
+
+export interface NinjaEndpointDef {
+  method: string;
+  path: string;
+  params: unknown;
+  query: unknown;
+  body: unknown;
+  response: unknown;
+  error: unknown;
+  request: Record<string, unknown>;
+}
+
+export type RequestOptionsFor<
+  Endpoints extends { [K in keyof Endpoints]: NinjaEndpointDef },
+  K extends keyof Endpoints,
+> = Endpoints[K]["request"] & BaseRequestOptions;
 
 export interface NinjaClientOptions {
   /** Static headers, or a (sync/async) callback evaluated on every request (e.g. JWT). */
@@ -134,35 +151,33 @@ export interface NinjaClientOptions {
   onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;
 }
 
-export interface NinjaClient {
+export interface NinjaClientFor<
+  Endpoints extends { [K in keyof Endpoints]: NinjaEndpointDef },
+> {
   readonly baseUrl: string;
-  fetch<K extends EndpointKey>(
+  fetch<K extends keyof Endpoints>(
     endpoint: K,
-    ...args: Record<never, never> extends NinjaEndpoints[K]["request"]
-      ? [options?: RequestOptions<K>]
-      : [options: RequestOptions<K>]
-  ): Promise<ResponseData<K>>;
+    ...args: Record<never, never> extends Endpoints[K]["request"]
+      ? [options?: RequestOptionsFor<Endpoints, K>]
+      : [options: RequestOptionsFor<Endpoints, K>]
+  ): Promise<Endpoints[K]["response"]>;
 }
 """
 
-DECLARATIONS = r"""
-export declare const DEFAULT_RETRY_METHODS: readonly string[];
+ENDPOINT_BINDING_TYPES = r"""export type EndpointKey = keyof NinjaEndpoints;
 
-export declare class NinjaApiError<T = unknown> extends Error {
-  readonly status: number;
-  readonly statusText: string;
-  readonly data: T;
-  readonly response: Response;
-  readonly headers: Headers;
-  constructor(response: Response, data: T, message?: string);
-}
+export type RequestParams<K extends EndpointKey> = NinjaEndpoints[K]["params"];
+export type RequestQuery<K extends EndpointKey> = NinjaEndpoints[K]["query"];
+export type RequestBody<K extends EndpointKey> = NinjaEndpoints[K]["body"];
+export type ResponseData<K extends EndpointKey> = NinjaEndpoints[K]["response"];
+export type ResponseError<K extends EndpointKey> = NinjaEndpoints[K]["error"];
 
-export declare function isNinjaApiError<T = unknown>(error: unknown): error is NinjaApiError<T>;
+export type RequestOptions<K extends EndpointKey> = RequestOptionsFor<NinjaEndpoints, K>;
 
-export declare function createNinjaClient(baseUrl?: string, clientOptions?: NinjaClientOptions): NinjaClient;
+export type NinjaClient = NinjaClientFor<NinjaEndpoints>;
 """
 
-IMPLEMENTATION = r"""
+_SHARED_RUNTIME_HELPERS = r"""
 export const DEFAULT_RETRY_METHODS: readonly string[] = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
 
 export class NinjaApiError<T = unknown> extends Error {
@@ -171,8 +186,9 @@ export class NinjaApiError<T = unknown> extends Error {
   readonly data: T;
   readonly response: Response;
   readonly headers: Headers;
+  readonly endpoint?: string;
 
-  constructor(response: Response, data: T, message?: string) {
+  constructor(response: Response, data: T, message?: string, endpoint?: string) {
     super(message ?? `Request failed with status ${response.status}`);
     Object.setPrototypeOf(this, NinjaApiError.prototype);
     this.name = "NinjaApiError";
@@ -181,6 +197,9 @@ export class NinjaApiError<T = unknown> extends Error {
     this.data = data;
     this.response = response;
     this.headers = response.headers;
+    if (endpoint !== undefined) {
+      this.endpoint = endpoint;
+    }
   }
 }
 
@@ -441,8 +460,13 @@ function resolvePath(endpoint: string, template: string, params: Record<string, 
   });
 }
 
-function encodeBody(endpoint: string, body: unknown, headers: Headers): BodyInit {
-  let encoding = BODY_ENCODINGS[endpoint] ?? "json";
+function encodeBody(
+  endpoint: string,
+  body: unknown,
+  headers: Headers,
+  bodyEncodings: BodyEncodingMap,
+): BodyInit {
+  let encoding = bodyEncodings[endpoint] ?? "json";
   if (encoding === "json" && hasBlobValue(body)) {
     encoding = "multipart";
   }
@@ -472,9 +496,9 @@ function encodeBody(endpoint: string, body: unknown, headers: Headers): BodyInit
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   return JSON.stringify(body);
 }
+"""
 
-export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOptions = {}): NinjaClient {
-  const root = baseUrl.replace(/\/+$/, "");
+_CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
 
   async function request(endpoint: string, options: RawRequestOptions): Promise<unknown> {
     const separator = endpoint.indexOf(" ");
@@ -500,7 +524,7 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
 
     const init: NinjaRequestInit = { method, headers };
     if (options.body !== undefined) {
-      init.body = encodeBody(endpoint, options.body, headers);
+      init.body = encodeBody(endpoint, options.body, headers, bodyEncodings);
     }
     const credentials = options.credentials ?? clientOptions.credentials;
     if (credentials) init.credentials = credentials;
@@ -618,7 +642,8 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
       const apiError = new NinjaApiError(
         response,
         data,
-        errorMessage(data, response.statusText || `HTTP ${response.status}`)
+        errorMessage(data, response.statusText || `HTTP ${response.status}`),
+        endpoint,
       );
       if (clientOptions.onError) {
         await clientOptions.onError(apiError, context);
@@ -630,13 +655,23 @@ export function createNinjaClient(baseUrl = "", clientOptions: NinjaClientOption
     }
     return readBody(response);
   }
+"""
 
-  return {
+MODULAR_RUNTIME = f"""{COMMON_TYPES}{_SHARED_RUNTIME_HELPERS}
+export function createNinjaClientFor<
+  Endpoints extends {{ [K in keyof Endpoints]: NinjaEndpointDef }},
+>(
+  baseUrl = "",
+  clientOptions: NinjaClientOptions = {{}},
+  bodyEncodings: BodyEncodingMap = {{}},
+): NinjaClientFor<Endpoints> {{
+{_CLIENT_FACTORY_BODY}
+  return {{
     baseUrl: root,
-    fetch(endpoint, ...args) {
+    fetch(endpoint, ...args) {{
       const [options] = args as unknown as [RawRequestOptions?];
-      return request(String(endpoint), options ?? {}) as Promise<ResponseData<typeof endpoint>>;
-    },
-  };
-}
+      return request(String(endpoint), options ?? {{}}) as Promise<Endpoints[typeof endpoint]["response"]>;
+    }},
+  }};
+}}
 """

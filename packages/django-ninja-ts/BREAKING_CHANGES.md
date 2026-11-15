@@ -46,3 +46,13 @@ The `onResponse` and `onError` hooks now always execute in `clientOptions -> opt
 - `onRequest`: `clientOptions -> options`
 - `onResponse`: `clientOptions -> options`
 - `onError`: `clientOptions -> options`
+
+---
+
+## 3. Modular Directory SDK Only (Removed Monolithic `api.ts`)
+
+`generate_sdk()` and `export_sdk()` now exclusively emit the modular multi-file SDK directory (`index.ts`, `runtime.ts`, `types/*.ts`, `endpoints/*.ts`), matching `gota`'s layout.
+
+- `generate_sdk(...)` returns `dict[str, str]` (relative file paths to TypeScript contents) instead of a single `str`.
+- `export_sdk(api, directory)` / `sync_sdk(api, directory)` / `check_sdk(api, directory)` and `manage.py generate_ts_sdk -o <dir>` target an output directory instead of a single `.ts` file (no `--modular` flag needed).
+- Removed the monolithic `/api/sdk.ts` view (`create_sdk_view`, `sdk_url` in `ninja_ts.install()`), as well as all standalone `.d.ts` generation and serving (`generate_types()`, `export_types()`, `check_types()`, `install()`, `create_types_view()`, `--types-only`, and `/api/types.d.ts`), matching `gota`. Use `import type { ... } from "./sdk"` against the modular SDK when only types are needed.

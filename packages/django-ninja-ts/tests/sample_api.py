@@ -2,7 +2,6 @@
 
 from typing import Literal
 
-import ninja_ts
 from ninja import Field, File, Form, NinjaAPI, Query, Router, Schema
 from ninja.files import UploadedFile
 
@@ -93,6 +92,3 @@ api.add_router("/todos", router)
 @api.get("/health")
 def health(request):
     return {"status": "ok"}
-
-
-ninja_ts.install(api)

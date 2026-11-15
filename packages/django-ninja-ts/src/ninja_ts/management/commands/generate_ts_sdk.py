@@ -1,15 +1,20 @@
-"""``manage.py generate_ts_sdk``: export the TypeScript SDK / declarations (ideal for CI)."""
+"""``manage.py generate_ts_sdk``: export or verify the modular TypeScript SDK (ideal for CI)."""
 
 from __future__ import annotations
 
 import gc
 from importlib import import_module
+from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils.module_loading import import_string
 
-from ninja_ts.integration import export_sdk, export_types, generate_sdk, generate_types
+from ninja_ts.integration import (
+    SdkDriftError,
+    check_sdk,
+    sync_sdk,
+)
 
 
 def resolve_api(dotted_path: str | None):
@@ -43,7 +48,7 @@ def resolve_api(dotted_path: str | None):
 
 
 class Command(BaseCommand):
-    help = "Generate a zero-dependency TypeScript SDK (or .d.ts declarations) from a Django Ninja API."
+    help = "Generate a zero-dependency modular TypeScript SDK directory from a Django Ninja API."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -54,12 +59,17 @@ class Command(BaseCommand):
         parser.add_argument(
             "-o",
             "--out",
-            help="Output file (parent directories are created). Prints to stdout when omitted.",
+            help="Output directory for the modular SDK (e.g. ./sdk).",
         )
         parser.add_argument(
-            "--types-only",
+            "--import-ext",
+            default="auto",
+            help="Relative import extension: 'auto' (default), 'none' / '', '.js', or '.ts'.",
+        )
+        parser.add_argument(
+            "--check",
             action="store_true",
-            help="Emit TypeScript declarations (.d.ts) instead of the full SDK.",
+            help="Verify that existing output matches the generated SDK without modifying files.",
         )
         parser.add_argument(
             "--path-prefix",
@@ -68,15 +78,41 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        out = options["out"]
+        check = bool(options["check"])
+        import_ext = options["import_ext"]
+
+        if check and not out:
+            raise CommandError("--check requires -o/--out.")
+        if not out:
+            raise CommandError(
+                "-o/--out <directory> is required when generating the TypeScript SDK."
+            )
+        if Path(out).suffix.lower() in (".ts", ".mts", ".cts"):
+            raise CommandError(
+                f"-o/--out expects a directory for the modular SDK, not a file path ({out})."
+            )
+
         api = resolve_api(options["api"])
         prefix = options["path_prefix"]
-        types_only = options["types_only"]
 
-        if options["out"]:
-            exporter = export_types if types_only else export_sdk
-            target = exporter(api, options["out"], path_prefix=prefix)
-            kind = "TypeScript declarations" if types_only else "TypeScript SDK"
-            self.stdout.write(self.style.SUCCESS(f"✅ {kind} written to {target}"))
-        else:
-            generate = generate_types if types_only else generate_sdk
-            self.stdout.write(generate(api, path_prefix=prefix), ending="")
+        try:
+            if check:
+                result = check_sdk(api, out, path_prefix=prefix, import_ext=import_ext)
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"✅ TypeScript SDK in {result.directory} is up to date "
+                        f"({len(result.unchanged)} file(s))."
+                    )
+                )
+            else:
+                result = sync_sdk(api, out, path_prefix=prefix, import_ext=import_ext)
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"✅ TypeScript SDK synced to {result.directory} "
+                        f"({len(result.written)} written, {len(result.unchanged)} unchanged, "
+                        f"{len(result.removed)} removed)"
+                    )
+                )
+        except (SdkDriftError, ValueError) as exc:
+            raise CommandError(str(exc)) from exc
