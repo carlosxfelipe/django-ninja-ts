@@ -39,7 +39,6 @@ export type {
   RequestContext,
   RequestOptionsFor,
 } from "./runtime";
-export type * from "./types/_shared";
 export type * from "./types/system";
 export type * from "./types/todos";
 export type * from "./endpoints/system";

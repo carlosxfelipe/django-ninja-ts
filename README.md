@@ -89,17 +89,11 @@ Export the modular TypeScript SDK directory directly to disk without running an 
 uv run python manage.py generate_ts_sdk -o ./sdk
 ```
 
-This writes `index.ts`, `runtime.ts`, `types/<module>.ts` (with shared schemas in `types/_shared.ts`), and `endpoints/<module>.ts`, skipping unchanged files and pruning stale generated `.ts` files. Use `--import-ext auto|none|.js|.ts` to control relative import extensions (auto-detected from `tsconfig.json` / `package.json` / `deno.json`), and `--check` in CI to fail on drift:
+This writes `index.ts`, `runtime.ts`, `types/<module>.ts` (with schemas shared across multiple modules in `types/_shared.ts`, when any), and `endpoints/<module>.ts`, skipping unchanged files and pruning stale generated `.ts` files. Use `--import-ext auto|none|.js|.ts` to control relative import extensions (auto-detected from `tsconfig.json` / `package.json` / `deno.json`), and `--check` in CI to fail on drift:
 
 ```bash
 uv run python manage.py generate_ts_sdk -o ./sdk --check
 ```
-
-### 4. Zero-Build Frontend Demo
-
-A zero-build Vue 3 frontend (replicated from `gota/examples/frontend`) is included in `frontend/`:
-
-Simply open `frontend/index.html` in your browser while the Django server is running to interact with the API, test real-time validation, and inspect the client.
 
 ## 📦 Workspace Structure
 
@@ -108,7 +102,6 @@ This repository is organized as a `uv` workspace:
 - `packages/django-ninja-ts/`: The standalone, publishable PyPI library (`django-ninja-ts`).
 - `config/` & `apps/`: The Django example app demonstrating how to use the package.
 - `sdk/`: Modular TypeScript SDK generated from the example API.
-- `frontend/`: Zero-build browser frontend consuming the generated SDK.
 
 ## 🧪 Tests & Quality
 

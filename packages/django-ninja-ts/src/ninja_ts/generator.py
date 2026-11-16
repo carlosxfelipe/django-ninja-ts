@@ -842,7 +842,8 @@ class TypeScriptGenerator:
             schema_decls[raw] = decl
             schema_deps[raw] = deps
 
-        # Assign each schema to a module if only one module reaches it, else _shared.
+        # Assign each reachable schema to a module if only one module reaches it, else _shared.
+        # Unreachable schemas (e.g. Query[...] filter models expanded inline) are omitted.
         module_reach: dict[str, set[str]] = {raw: set() for raw in self.schemas}
         for slug, mod_routes in modules.items():
             roots: set[str] = set().union(*(r.direct_refs for r in mod_routes))
@@ -860,6 +861,8 @@ class TypeScriptGenerator:
         owner_schemas: dict[str, list[str]] = {}
         for raw in sorted(self.schemas, key=lambda r: self._names[r]):
             owners = module_reach[raw]
+            if not owners:
+                continue
             owner = next(iter(owners)) if len(owners) == 1 else _SHARED_SLUG
             schema_owner[raw] = owner
             owner_schemas.setdefault(owner, []).append(raw)

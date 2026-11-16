@@ -156,11 +156,13 @@ def test_deprecated_and_summary_jsdoc(sdk_text):
     assert "   * Delete todo\n   * @deprecated\n" in sdk_text
 
 
-def test_query_schema_is_flattened_and_optional(sdk_text):
+def test_query_schema_is_flattened_and_optional(sdk, sdk_text):
     block = endpoint_block(sdk_text, "GET /api/todos")
     assert "query: { limit?: number; q?: string | null };" in block
     assert "query?: { limit?: number; q?: string | null }" in block
     assert "response: TodoOut[];" in block
+    assert "types/_shared.ts" not in sdk
+    assert "TodoFilters" not in sdk_text
 
 
 def test_required_query_makes_query_required(sdk_text):
@@ -286,7 +288,21 @@ def test_schema_jsdoc_and_date_time_inference():
     openapi = {
         "openapi": "3.1.0",
         "info": {"title": "DocTest"},
-        "paths": {},
+        "paths": {
+            "/events": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/EventItem"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "components": {
             "schemas": {
                 "EventItem": {
@@ -810,7 +826,8 @@ def test_modular_sdk_schema_placement_and_transitive_shared():
 
     assert "export interface AuditMeta" in files["types/_shared.ts"]
     assert "export type SharedTag = string;" in files["types/_shared.ts"]
-    assert "export interface OrphanSchema" in files["types/_shared.ts"]
+    assert "OrphanSchema" not in files["types/_shared.ts"]
+    assert "OrphanSchema" not in files["index.ts"]
 
     assert 'import type { AuditMeta } from "./_shared.js";' in files["types/todos.ts"]
     assert "export interface TodoItem" in files["types/todos.ts"]
