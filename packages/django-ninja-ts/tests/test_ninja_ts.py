@@ -147,9 +147,9 @@ def test_client_lifecycle_hooks(sdk):
     assert "if (options.onResponse) {" in runtime_ts
     assert "await options.onResponse(response, context);" in runtime_ts
     assert "if (clientOptions.onError) {" in runtime_ts
-    assert "await clientOptions.onError(apiError, context);" in runtime_ts
+    assert "await clientOptions.onError(errObj, context);" in runtime_ts
     assert "if (options.onError) {" in runtime_ts
-    assert "await options.onError(apiError, context);" in runtime_ts
+    assert "await options.onError(errObj, context);" in runtime_ts
 
 
 def test_deprecated_and_summary_jsdoc(sdk_text):
@@ -450,11 +450,15 @@ CONSUMER = """
 import {
   createNinjaClient,
   NinjaApiError,
+  isAbortError,
   isNinjaApiError,
+  parseNinjaError,
   DEFAULT_RETRY_METHODS,
   type ResponseData,
   type ResponseError,
   type NextFetchRequestConfig,
+  type NinjaErrorDetails,
+  type NinjaQueryOptions,
   type NinjaRetryConfig,
   type NinjaRequestInit,
   type NinjaRequestConfig,
@@ -525,6 +529,12 @@ async function main(): Promise<void> {
   type StrictError = ResponseError<"GET /api/todos/{id}/strict">;
   type DefaultError = ResponseError<"GET /api/todos">;
 
+  const qOpts: NinjaQueryOptions<"GET /api/todos", ResponseData<"GET /api/todos">> =
+    api.queryOptions("GET /api/todos", { query: { limit: 5 } });
+  const qList = await qOpts.queryFn();
+  // @ts-expect-error queryOptions requires params when path param is present
+  api.queryOptions("GET /api/todos/{id}");
+
   // @ts-expect-error path params are required
   await api.fetch("GET /api/todos/{id}");
   // @ts-expect-error priority must be a known literal
@@ -539,6 +549,10 @@ async function main(): Promise<void> {
   try {
     await api.fetch("GET /api/todos/{id}/strict", { params: { id: "todo_1" } });
   } catch (err) {
+    const parsed: NinjaErrorDetails = parseNinjaError(err);
+    if (isAbortError(err)) {
+      console.log(parsed.kind);
+    }
     if (isNinjaApiError<StrictError>(err)) {
       const errData: StrictError = err.data;
       const statusText: string = err.statusText;
@@ -546,7 +560,7 @@ async function main(): Promise<void> {
       console.log(err.status, statusText, errData, contentType);
     }
   }
-  console.log(list, filtered, done, created, removed, file1, file2);
+  console.log(list, qList, filtered, done, created, removed, file1, file2);
 }
 
 void main();
@@ -703,6 +717,169 @@ assert.equal(xml, "<ok/>");
 
 const partialJson = await client.fetch("GET /api/todos", { headers: { "X-Partial-Json": "1" } });
 assert.deepEqual(partialJson, [{ id: "1" }]);
+"""
+    (tmp_path / "runner.mts").write_text(runner)
+    result = subprocess.run(
+        [node_path, "--experimental-strip-types", "runner.mts"],
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not node_path, reason="Node.js not on PATH")
+def test_query_options_parse_error_abort_and_retry_cancellation(tmp_path: Path):
+    assert node_path is not None
+    ninja_ts.export_sdk(api, tmp_path / "sdk", import_ext=".ts")
+    runner = """
+import assert from "node:assert/strict";
+import {
+  createNinjaClient,
+  isAbortError,
+  isNinjaApiError,
+  parseNinjaError,
+} from "./sdk/index.ts";
+
+let onErrorCount = 0;
+let cancelledRetryBody = false;
+
+const client = createNinjaClient("https://example.test", {
+  onError() {
+    onErrorCount++;
+  },
+  async fetch(url, init) {
+    const mode = init.headers.get("X-Mode");
+    if (mode === "ok") {
+      return new Response(JSON.stringify([{ id: "1", title: "A", priority: "low", done: false }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (mode === "422") {
+      return new Response(
+        JSON.stringify({
+          detail: [{ loc: ["body", "title"], msg: "Too short", type: "string_too_short" }],
+        }),
+        {
+          status: 422,
+          headers: { "content-type": "application/json", "X-Request-Id": "req-422" },
+        },
+      );
+    }
+    if (mode === "500") {
+      return new Response(JSON.stringify({ detail: "boom" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (mode === "network") {
+      throw new TypeError("fetch failed");
+    }
+    if (mode === "slow") {
+      return await new Promise((_resolve, reject) => {
+        const timer = setTimeout(() => {}, 10_000);
+        init.signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(init.signal?.reason);
+          },
+          { once: true },
+        );
+      });
+    }
+    if (mode === "retry-503") {
+      return {
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: new Headers({ "Retry-After": "10", "content-type": "application/json" }),
+        body: {
+          async cancel() {
+            cancelledRetryBody = true;
+          },
+        },
+        async text() {
+          return JSON.stringify({ detail: "busy" });
+        },
+      };
+    }
+    throw new Error(`unexpected mode: ${mode} (${url})`);
+  },
+});
+
+// 1. queryOptions builds stable queryKey and forwards AbortSignal
+const qOpts = client.queryOptions("GET /api/todos", {
+  query: { limit: 5 },
+  headers: { "X-Mode": "ok" },
+});
+assert.deepEqual(qOpts.queryKey, ["GET /api/todos", { query: { limit: 5 } }]);
+const qData = await qOpts.queryFn();
+assert.equal(qData[0].id, "1");
+
+const qCtrl = new AbortController();
+setTimeout(() => qCtrl.abort(), 20);
+const qSlow = client.queryOptions("GET /api/todos", { headers: { "X-Mode": "slow" } });
+await assert.rejects(
+  () => qSlow.queryFn({ signal: qCtrl.signal }),
+  (err) => isAbortError(err) && parseNinjaError(err).kind === "abort",
+);
+
+// 2. parseNinjaError normalizes 422 validation errors + X-Request-Id
+await assert.rejects(
+  () => client.fetch("POST /api/todos", { body: { title: "ab" }, headers: { "X-Mode": "422" } }),
+  (err) => {
+    const parsed = parseNinjaError(err);
+    return (
+      parsed.kind === "validation" &&
+      parsed.status === 422 &&
+      parsed.requestId === "req-422" &&
+      parsed.endpoint === "POST /api/todos" &&
+      parsed.fieldErrors["body.title"]?.[0] === "Too short"
+    );
+  },
+);
+
+// 3. parseNinjaError handles 500 HTTP error and cross-realm brand
+await assert.rejects(
+  () => client.fetch("GET /api/todos", { headers: { "X-Mode": "500" } }),
+  (err) => {
+    const parsed = parseNinjaError(err);
+    return parsed.kind === "http" && parsed.status === 500 && parsed.message === "boom";
+  },
+);
+const branded = { [Symbol.for("ninja_ts.apiError")]: true };
+assert.equal(isNinjaApiError(branded), true);
+
+// 4. parseNinjaError distinguishes network errors and timeouts
+await assert.rejects(
+  () => client.fetch("GET /api/todos", { headers: { "X-Mode": "network" } }),
+  (err) => parseNinjaError(err).kind === "network",
+);
+await assert.rejects(
+  () => client.fetch("GET /api/todos", { timeoutMs: 25, headers: { "X-Mode": "slow" } }),
+  (err) => !isAbortError(err) && parseNinjaError(err).kind === "timeout",
+);
+
+// 5. Caller abort skips onError hooks AND cancels retry backoff early + releases body
+onErrorCount = 0;
+const retryCtrl = new AbortController();
+setTimeout(() => retryCtrl.abort(), 40);
+const started = Date.now();
+await assert.rejects(
+  () =>
+    client.fetch("GET /api/todos", {
+      headers: { "X-Mode": "retry-503" },
+      retry: { attempts: 3, methods: ["GET"] },
+      signal: retryCtrl.signal,
+    }),
+  (err) => isAbortError(err) && parseNinjaError(err).kind === "abort",
+);
+assert.equal(cancelledRetryBody, true);
+assert.equal(onErrorCount, 0);
+assert.ok(Date.now() - started < 1000, "retry sleep should abort promptly");
 """
     (tmp_path / "runner.mts").write_text(runner)
     result = subprocess.run(

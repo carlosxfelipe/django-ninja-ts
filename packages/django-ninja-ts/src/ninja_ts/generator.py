@@ -1055,7 +1055,9 @@ class TypeScriptGenerator:
             "  DEFAULT_RETRY_METHODS,\n"
             "  NinjaApiError,\n"
             "  createNinjaClientFor,\n"
+            "  isAbortError,\n"
             "  isNinjaApiError,\n"
+            "  parseNinjaError,\n"
             f'}} from "./runtime{import_ext}";\n'
         )
         out.append(
@@ -1067,7 +1069,11 @@ class TypeScriptGenerator:
             "  NinjaClientFor,\n"
             "  NinjaClientOptions,\n"
             "  NinjaEndpointDef,\n"
+            "  NinjaErrorDetails,\n"
+            "  NinjaErrorKind,\n"
             "  NinjaHttpError,\n"
+            "  NinjaQueryKeyArgs,\n"
+            "  NinjaQueryOptions,\n"
             "  NinjaRequestConfig,\n"
             "  NinjaRequestInit,\n"
             "  NinjaRetryConfig,\n"

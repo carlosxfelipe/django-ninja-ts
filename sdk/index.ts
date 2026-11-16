@@ -20,7 +20,9 @@ export {
   DEFAULT_RETRY_METHODS,
   NinjaApiError,
   createNinjaClientFor,
+  isAbortError,
   isNinjaApiError,
+  parseNinjaError,
 } from "./runtime";
 export type {
   BaseRequestOptions,
@@ -30,7 +32,11 @@ export type {
   NinjaClientFor,
   NinjaClientOptions,
   NinjaEndpointDef,
+  NinjaErrorDetails,
+  NinjaErrorKind,
   NinjaHttpError,
+  NinjaQueryKeyArgs,
+  NinjaQueryOptions,
   NinjaRequestConfig,
   NinjaRequestInit,
   NinjaRetryConfig,

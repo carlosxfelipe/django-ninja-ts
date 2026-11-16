@@ -114,6 +114,22 @@ export interface NinjaClientOptions {
   onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;
 }
 
+export interface NinjaQueryKeyArgs {
+  params?: unknown;
+  query?: unknown;
+  body?: unknown;
+}
+
+/**
+ * Framework-agnostic query descriptor: pass it to TanStack Query (useQuery, queryOptions,
+ * prefetchQuery) or use queryKey/queryFn with SWR. The query key always starts with the
+ * endpoint, so invalidateQueries({ queryKey: ["GET /api/todos"] }) matches every variant.
+ */
+export interface NinjaQueryOptions<K extends string, R> {
+  queryKey: readonly [K, NinjaQueryKeyArgs];
+  queryFn: (context?: { signal?: AbortSignal | undefined }) => Promise<R>;
+}
+
 export interface NinjaClientFor<
   Endpoints extends { [K in keyof Endpoints]: NinjaEndpointDef },
 > {
@@ -124,9 +140,39 @@ export interface NinjaClientFor<
       ? [options?: RequestOptionsFor<Endpoints, K>]
       : [options: RequestOptionsFor<Endpoints, K>]
   ): Promise<Endpoints[K]["response"]>;
+  queryOptions<K extends keyof Endpoints & string>(
+    endpoint: K,
+    ...args: Record<never, never> extends Endpoints[K]["request"]
+      ? [options?: RequestOptionsFor<Endpoints, K>]
+      : [options: RequestOptionsFor<Endpoints, K>]
+  ): NinjaQueryOptions<K, Endpoints[K]["response"]>;
+}
+
+export type NinjaErrorKind = "http" | "validation" | "timeout" | "abort" | "network" | "unknown";
+
+/** Normalized error information returned by parseNinjaError. */
+export interface NinjaErrorDetails {
+  kind: NinjaErrorKind;
+  /** Human-readable message, safe to display. */
+  message: string;
+  /** HTTP status code (only for HTTP errors). */
+  status?: number;
+  /** Per-field validation messages (empty when the error is not a validation error). */
+  fieldErrors: Record<string, string[]>;
+  requestId?: string;
+  /** Endpoint key ("METHOD /path") that produced the error. */
+  endpoint?: string;
+  /** Raw error payload returned by the API. */
+  data?: unknown;
+  /** The original thrown value. */
+  cause: unknown;
 }
 
 export const DEFAULT_RETRY_METHODS: readonly string[] = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
+
+/** Errors thrown by fetch itself (connection refused, DNS failure, CORS...). */
+const NETWORK_ERRORS: WeakSet<object> = /* @__PURE__ */ new WeakSet<object>();
+const NINJA_ERROR_BRAND = Symbol.for("ninja_ts.apiError");
 
 export class NinjaApiError<T = unknown> extends Error {
   readonly status: number;
@@ -138,7 +184,6 @@ export class NinjaApiError<T = unknown> extends Error {
 
   constructor(response: Response, data: T, message?: string, endpoint?: string) {
     super(message ?? `Request failed with status ${response.status}`);
-    Object.setPrototypeOf(this, NinjaApiError.prototype);
     this.name = "NinjaApiError";
     this.status = response.status;
     this.statusText = response.statusText;
@@ -148,11 +193,119 @@ export class NinjaApiError<T = unknown> extends Error {
     if (endpoint !== undefined) {
       this.endpoint = endpoint;
     }
+    Object.defineProperty(this, NINJA_ERROR_BRAND, { value: true });
+    Object.setPrototypeOf(this, NinjaApiError.prototype);
   }
 }
 
 export function isNinjaApiError<T = unknown>(error: unknown): error is NinjaApiError<T> {
-  return error instanceof NinjaApiError;
+  return (
+    error instanceof NinjaApiError ||
+    (error !== null && typeof error === "object" && (error as Record<symbol, unknown>)[NINJA_ERROR_BRAND] === true)
+  );
+}
+
+function errorName(error: unknown): unknown {
+  return error !== null && typeof error === "object" ? (error as { name?: unknown }).name : undefined;
+}
+
+/** Reports whether the error comes from a cancelled request (AbortController.abort()). Timeouts return false. */
+export function isAbortError(error: unknown): boolean {
+  return errorName(error) === "AbortError";
+}
+
+function readStringField(data: unknown, key: string): string {
+  if (data === null || typeof data !== "object") return "";
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : "";
+}
+
+function issueField(e: Record<string, unknown>): string {
+  if (Array.isArray(e["loc"])) return e["loc"].map(String).join(".");
+  if (typeof e["field"] === "string") return e["field"];
+  if (typeof e["path"] === "string") return e["path"];
+  return "";
+}
+
+function issueMessage(e: Record<string, unknown>): string {
+  if (typeof e["msg"] === "string") return e["msg"];
+  if (typeof e["message"] === "string") return e["message"];
+  if (typeof e["error"] === "string") return e["error"];
+  return "";
+}
+
+function addFieldError(out: Record<string, string[]>, field: string, message: string): void {
+  const list = out[field];
+  if (list) list.push(message);
+  else out[field] = [message];
+}
+
+function extractFieldErrors(data: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (data === null || typeof data !== "object") return out;
+  const d = data as Record<string, unknown>;
+  const source = d["errors"] ?? d["detail"];
+  if (Array.isArray(source)) {
+    for (const item of source) {
+      if (item === null || typeof item !== "object") continue;
+      const e = item as Record<string, unknown>;
+      const field = issueField(e);
+      const message = issueMessage(e);
+      if (field && message) addFieldError(out, field, message);
+    }
+  } else if (source !== null && typeof source === "object") {
+    for (const [field, value] of Object.entries(source)) {
+      if (typeof value === "string") {
+        addFieldError(out, field, value);
+      } else if (Array.isArray(value)) {
+        for (const item of value) {
+          if (typeof item === "string") addFieldError(out, field, item);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Normalizes anything thrown by the client into a display-friendly structure, including
+ * per-field validation messages (Django Ninja / Pydantic detail) and the request ID.
+ */
+export function parseNinjaError(error: unknown): NinjaErrorDetails {
+  if (isNinjaApiError(error)) {
+    const fieldErrors = extractFieldErrors(error.data);
+    const details: NinjaErrorDetails = {
+      kind: Object.keys(fieldErrors).length > 0 ? "validation" : "http",
+      message: error.message,
+      status: error.status,
+      fieldErrors,
+      data: error.data,
+      cause: error,
+    };
+    const requestId =
+      readStringField(error.data, "requestId") ||
+      readStringField(error.data, "request_id") ||
+      error.headers.get("X-Request-Id");
+    if (requestId) details.requestId = requestId;
+    if (error.endpoint) details.endpoint = error.endpoint;
+    return details;
+  }
+  if (isAbortError(error)) {
+    return { kind: "abort", message: "The request was cancelled.", fieldErrors: {}, cause: error };
+  }
+  if (errorName(error) === "TimeoutError") {
+    return { kind: "timeout", message: "The request timed out.", fieldErrors: {}, cause: error };
+  }
+  if (error !== null && typeof error === "object" && NETWORK_ERRORS.has(error)) {
+    return { kind: "network", message: "Network error: unable to reach the API.", fieldErrors: {}, cause: error };
+  }
+  if (error instanceof Error && error.message) {
+    return { kind: "unknown", message: error.message, fieldErrors: {}, cause: error };
+  }
+  if (typeof error === "string" && error) {
+    return { kind: "unknown", message: error, fieldErrors: {}, cause: error };
+  }
+  return { kind: "unknown", message: "Unexpected error communicating with the API.", fieldErrors: {}, cause: error };
 }
 
 type FormEntry = [string, string | Blob];
@@ -241,7 +394,7 @@ function createTimeoutSignal(timeoutMs?: number): AbortSignal | undefined {
   const timeoutReason =
     typeof DOMException !== "undefined"
       ? new DOMException("The operation timed out.", "TimeoutError")
-      : new Error("The operation timed out.");
+      : Object.assign(new Error("The operation timed out."), { name: "TimeoutError" });
   const timer: unknown = setTimeout(() => controller.abort(timeoutReason), timeoutMs);
   if (
     typeof timer === "object" &&
@@ -389,6 +542,33 @@ function retryDelay(attempt: number, baseDelay: number, res?: Response): number 
   return baseDelay * Math.pow(2, attempt - 1) * (0.5 + Math.random() * 0.5);
 }
 
+/** Waits for the retry backoff, rejecting early when the request is cancelled or times out. */
+function sleep(ms: number, signal: AbortSignal | null | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (
+      typeof timer === "object" &&
+      timer &&
+      "unref" in timer &&
+      typeof (timer as { unref: () => void }).unref === "function"
+    ) {
+      (timer as { unref: () => void }).unref();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function resolvePath(endpoint: string, template: string, params: Record<string, unknown>): string {
   return template.replace(/\{([^}]+)\}/g, (_match, rawName: string) => {
     const isCatchAll = rawName.startsWith("+") || rawName.endsWith("*");
@@ -506,6 +686,19 @@ export function createNinjaClientFor<
     }
 
     const context: RequestContext = { endpoint, url };
+    const fail = async (err: unknown): Promise<never> => {
+      // Cancellations requested by the caller (e.g. effect cleanup) are expected: skip onError hooks.
+      if (!options.signal?.aborted) {
+        const errObj = err instanceof Error ? err : new Error(String(err));
+        if (clientOptions.onError) {
+          await clientOptions.onError(errObj, context);
+        }
+        if (options.onError) {
+          await options.onError(errObj, context);
+        }
+      }
+      throw err;
+    };
 
     if (clientOptions.onRequest) {
       await clientOptions.onRequest({ endpoint, url, init });
@@ -542,47 +735,45 @@ export function createNinjaClientFor<
     }
 
     const fetchFn = clientOptions.fetch ?? globalThis.fetch.bind(globalThis);
-    let lastResponse: Response | undefined;
+    let response: Response;
     let attempt = 0;
 
     while (true) {
       try {
-        const res = await fetchFn(url, init);
-        lastResponse = res;
-        if (
-          !res.ok &&
-          attempt < maxAttempts - 1 &&
-          retryStatuses.includes(res.status) &&
-          (!init.signal || !init.signal.aborted)
-        ) {
-          attempt++;
-          const delay = retryDelay(attempt, baseDelay, res);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
-        }
-        break;
+        response = await fetchFn(url, init);
       } catch (networkError) {
-        if (
-          attempt < maxAttempts - 1 &&
-          (!init.signal || !init.signal.aborted)
-        ) {
+        const aborted = init.signal?.aborted === true;
+        if (!aborted && networkError !== null && typeof networkError === "object") {
+          NETWORK_ERRORS.add(networkError);
+        }
+        if (attempt < maxAttempts - 1 && !aborted) {
           attempt++;
-          const delay = retryDelay(attempt, baseDelay);
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          try {
+            await sleep(retryDelay(attempt, baseDelay), init.signal);
+          } catch (abortErr) {
+            return fail(abortErr);
+          }
           continue;
         }
-        const err = networkError instanceof Error ? networkError : new Error(String(networkError));
-        if (clientOptions.onError) {
-          await clientOptions.onError(err, context);
-        }
-        if (options.onError) {
-          await options.onError(err, context);
-        }
-        throw networkError;
+        return fail(networkError);
       }
+      if (
+        !response.ok &&
+        attempt < maxAttempts - 1 &&
+        retryStatuses.includes(response.status) &&
+        !init.signal?.aborted
+      ) {
+        attempt++;
+        response.body?.cancel().catch(() => undefined);
+        try {
+          await sleep(retryDelay(attempt, baseDelay, response), init.signal);
+        } catch (abortErr) {
+          return fail(abortErr);
+        }
+        continue;
+      }
+      break;
     }
-
-    const response = lastResponse!;
 
     if (clientOptions.onResponse) {
       await clientOptions.onResponse(response, context);
@@ -599,13 +790,7 @@ export function createNinjaClientFor<
         errorMessage(data, response.statusText || `HTTP ${response.status}`),
         endpoint,
       );
-      if (clientOptions.onError) {
-        await clientOptions.onError(apiError, context);
-      }
-      if (options.onError) {
-        await options.onError(apiError, context);
-      }
-      throw apiError;
+      return fail(apiError);
     }
     return readBody(response);
   }
@@ -615,6 +800,22 @@ export function createNinjaClientFor<
     fetch(endpoint, ...args) {
       const [options] = args as unknown as [RawRequestOptions?];
       return request(String(endpoint), options ?? {}) as Promise<Endpoints[typeof endpoint]["response"]>;
+    },
+    queryOptions(endpoint, ...args) {
+      const [options] = args as unknown as [RawRequestOptions?];
+      const base: RawRequestOptions = options ?? {};
+      const keyArgs: NinjaQueryKeyArgs = {};
+      if (base.params !== undefined) keyArgs.params = base.params;
+      if (base.query !== undefined) keyArgs.query = base.query;
+      if (base.body !== undefined) keyArgs.body = base.body;
+      return {
+        queryKey: [endpoint, keyArgs] as const,
+        queryFn: (queryContext?: { signal?: AbortSignal | undefined }) => {
+          const signal = combineSignals(base.signal, queryContext?.signal);
+          const merged: RawRequestOptions = signal ? { ...base, signal } : base;
+          return request(String(endpoint), merged) as Promise<Endpoints[typeof endpoint]["response"]>;
+        },
+      };
     },
   };
 }
