@@ -489,6 +489,10 @@ const api = createNinjaClient("http://localhost:8000", {
   onError(err, context) {
     console.error("Client hook error:", err.message, context.endpoint);
   },
+  async onUnauthorized(context) {
+    console.warn("Unauthorized:", context.endpoint);
+    return false;
+  },
 });
 
 async function main(): Promise<void> {
@@ -1213,6 +1217,104 @@ def test_query_and_path_params_strip_null_while_body_preserves_null():
         in block
     )
     assert "  notes?: string | null;" in ts
+
+
+@pytest.mark.skipif(not node_path, reason="Node.js not on PATH")
+def test_client_on_unauthorized_refresh(tmp_path: Path):
+    assert node_path is not None
+    ninja_ts.export_sdk(api, tmp_path / "sdk", import_ext=".ts")
+    runner = """
+import assert from "node:assert/strict";
+import { createNinjaClient, isNinjaApiError } from "./sdk/index.ts";
+
+let token = "expired";
+let refreshCalls = 0;
+let onRequestCalls = 0;
+let onErrorCalls = 0;
+let seenBodies = [];
+
+const client = createNinjaClient("https://example.test", {
+  headers: () => ({ Authorization: `Bearer ${token}` }),
+  onRequest() {
+    onRequestCalls++;
+  },
+  onError() {
+    onErrorCalls++;
+  },
+  async onUnauthorized(ctx) {
+    refreshCalls++;
+    if (ctx.endpoint === "GET /api/todos/always401" || token === "reject-refresh") {
+      return false;
+    }
+    if (token === "throw-refresh") {
+      throw new Error("Refresh failed");
+    }
+    token = "fresh";
+    return true;
+  },
+  async fetch(_url, init) {
+    const auth = init.headers.get("Authorization");
+    if (init.body) {
+      seenBodies.push(String(init.body));
+    }
+    const mode = init.headers.get("X-Case");
+    if (mode === "still401" || auth === "Bearer expired") {
+      return new Response(JSON.stringify({ detail: "Token expired" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({ id: "todo_1", title: "Ship", priority: "high", done: false }),
+      { status: 201, headers: { "content-type": "application/json" } },
+    );
+  },
+});
+
+// 1. 401 -> refresh -> rebuilt headers + preserved POST body -> 201
+const created = await client.fetch("POST /api/todos", {
+  body: { title: "Ship", priority: "high" },
+});
+assert.equal(created.id, "todo_1");
+assert.equal(refreshCalls, 1);
+assert.equal(onRequestCalls, 2);
+assert.equal(seenBodies.length, 2);
+assert.equal(seenBodies[0], seenBodies[1]);
+
+// 2. Refresh returns true, but server still returns 401 -> does not loop
+token = "fresh";
+await assert.rejects(
+  () => client.fetch("GET /api/todos", { headers: { "X-Case": "still401" } }),
+  (err) => isNinjaApiError(err) && err.status === 401 && err.data.detail === "Token expired",
+);
+assert.equal(refreshCalls, 2);
+
+// 3. Refresh returns false -> original 401 body is preserved
+token = "reject-refresh";
+await assert.rejects(
+  () => client.fetch("GET /api/todos", { headers: { "X-Case": "still401" } }),
+  (err) => isNinjaApiError(err) && err.status === 401 && err.data.detail === "Token expired",
+);
+assert.equal(refreshCalls, 3);
+
+// 4. Refresh throws -> triggers onError and rejects with refresh error
+token = "throw-refresh";
+const beforeErrors = onErrorCalls;
+await assert.rejects(
+  () => client.fetch("GET /api/todos", { headers: { "X-Case": "still401" } }),
+  (err) => err instanceof Error && err.message === "Refresh failed",
+);
+assert.equal(onErrorCalls, beforeErrors + 1);
+"""
+    (tmp_path / "runner.mts").write_text(runner)
+    result = subprocess.run(
+        [node_path, "--experimental-strip-types", "runner.mts"],
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_management_command_check_and_guards(tmp_path: Path):

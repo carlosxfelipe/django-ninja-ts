@@ -157,6 +157,12 @@ export interface NinjaClientOptions {
   onResponse?: (response: Response, context: RequestContext) => Promise<void> | void;
   /** Hook invoked when an error occurs (network failure or non-2xx HTTP response). */
   onError?: (error: NinjaApiError | Error, context: RequestContext) => Promise<void> | void;
+  /**
+   * Hook invoked at most once per request when the API responds with HTTP 401.
+   * Return `true` (after refreshing credentials) to rebuild headers and retry once;
+   * return `false` to preserve and raise the original 401 `NinjaApiError`.
+   */
+  onUnauthorized?: (context: RequestContext) => boolean | Promise<boolean>;
 }
 
 export interface NinjaQueryKeyArgs {
@@ -703,12 +709,17 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
       if (qs) url += (url.includes("?") ? "&" : "?") + qs;
     }
 
-    const baseHeaders =
-      typeof clientOptions.headers === "function" ? await clientOptions.headers() : clientOptions.headers;
-    const headers = new Headers(baseHeaders);
-    if (options.headers) {
-      for (const [key, value] of Object.entries(options.headers)) headers.set(key, String(value));
-    }
+    const buildHeaders = async (): Promise<Headers> => {
+      const baseHeaders =
+        typeof clientOptions.headers === "function" ? await clientOptions.headers() : clientOptions.headers;
+      const nextHeaders = new Headers(baseHeaders);
+      if (options.headers) {
+        for (const [key, value] of Object.entries(options.headers)) nextHeaders.set(key, String(value));
+      }
+      return nextHeaders;
+    };
+
+    const headers = await buildHeaders();
 
     const init: NinjaRequestInit = { method, headers };
     if (options.body !== undefined) {
@@ -754,12 +765,16 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
       throw err;
     };
 
-    if (clientOptions.onRequest) {
-      await clientOptions.onRequest({ endpoint, url, init });
-    }
-    if (options.onRequest) {
-      await options.onRequest({ endpoint, url, init });
-    }
+    const runOnRequest = async (): Promise<void> => {
+      if (clientOptions.onRequest) {
+        await clientOptions.onRequest({ endpoint, url, init });
+      }
+      if (options.onRequest) {
+        await options.onRequest({ endpoint, url, init });
+      }
+    };
+
+    await runOnRequest();
 
     const retryOpt = options.retry ?? clientOptions.retry;
     let maxAttempts = 1;
@@ -791,6 +806,7 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
     const fetchFn = clientOptions.fetch ?? globalThis.fetch.bind(globalThis);
     let response: Response;
     let attempt = 0;
+    let retriedAuth = false;
 
     while (true) {
       try {
@@ -810,6 +826,36 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
           continue;
         }
         return fail(networkError);
+      }
+      if (
+        response.status === 401 &&
+        !retriedAuth &&
+        clientOptions.onUnauthorized &&
+        !init.signal?.aborted &&
+        !isReadableStream(init.body)
+      ) {
+        retriedAuth = true;
+        let shouldRetry = false;
+        try {
+          shouldRetry = await clientOptions.onUnauthorized(context);
+        } catch (refreshError) {
+          response.body?.cancel().catch(() => undefined);
+          return fail(refreshError);
+        }
+        if (init.signal?.aborted) {
+          response.body?.cancel().catch(() => undefined);
+          return fail(init.signal.reason);
+        }
+        if (shouldRetry) {
+          response.body?.cancel().catch(() => undefined);
+          const freshHeaders = await buildHeaders();
+          init.headers = freshHeaders;
+          if (options.body !== undefined) {
+            init.body = encodeBody(endpoint, options.body, freshHeaders, bodyEncodings);
+          }
+          await runOnRequest();
+          continue;
+        }
       }
       if (
         !response.ok &&
