@@ -428,7 +428,9 @@ class TypeScriptGenerator:
 
     # ------------------------------------------------------------------ schema -> TS
 
-    def _ts(self, schema: Any, response: bool = False) -> str:
+    def _ts(
+        self, schema: Any, response: bool = False, *, strip_null: bool = False
+    ) -> str:
         if schema is True or schema is None or schema == {}:
             return "unknown"
         if schema is False:
@@ -440,13 +442,31 @@ class TypeScriptGenerator:
         if "const" in schema:
             return _literal(schema["const"])
         if "enum" in schema:
-            ts = _union([_literal(v) for v in schema["enum"]])
-            return _union([ts, "null"]) if schema.get("nullable") is True else ts
+            values = (
+                [v for v in schema["enum"] if v is not None]
+                if strip_null
+                else list(schema["enum"])
+            )
+            if not values:
+                values = list(schema["enum"])
+            ts = _union([_literal(v) for v in values])
+            return (
+                _union([ts, "null"])
+                if schema.get("nullable") is True and not strip_null
+                else ts
+            )
         for key in ("oneOf", "anyOf"):
             if key in schema:
-                return _union([self._ts(s, response) for s in schema[key]])
+                parts = [
+                    self._ts(s, response, strip_null=strip_null) for s in schema[key]
+                ]
+                if strip_null:
+                    parts = [p for p in parts if p != "null"] or parts
+                return _union(parts)
         if "allOf" in schema:
-            parts = [self._ts(s, response) for s in schema["allOf"]]
+            parts = [
+                self._ts(s, response, strip_null=strip_null) for s in schema["allOf"]
+            ]
             rest = {k: v for k, v in schema.items() if k != "allOf"}
             if "properties" in rest:
                 parts.append(self._object(rest, response))
@@ -455,11 +475,28 @@ class TypeScriptGenerator:
 
         type_ = schema.get("type")
         if isinstance(type_, list):
-            return _union([self._ts({**schema, "type": t}, response) for t in type_])
-        ts = self._ts_for_type(schema, type_, response)
-        return _union([ts, "null"]) if schema.get("nullable") is True else ts
+            parts = [
+                self._ts({**schema, "type": t}, response, strip_null=strip_null)
+                for t in type_
+            ]
+            if strip_null:
+                parts = [p for p in parts if p != "null"] or parts
+            return _union(parts)
+        ts = self._ts_for_type(schema, type_, response, strip_null=strip_null)
+        return (
+            _union([ts, "null"])
+            if schema.get("nullable") is True and not strip_null
+            else ts
+        )
 
-    def _ts_for_type(self, schema: dict[str, Any], type_: Any, response: bool) -> str:
+    def _ts_for_type(
+        self,
+        schema: dict[str, Any],
+        type_: Any,
+        response: bool,
+        *,
+        strip_null: bool = False,
+    ) -> str:
         if type_ == "string":
             return "Blob" if schema.get("format") == "binary" else "string"
         if type_ in ("integer", "number"):
@@ -470,9 +507,12 @@ class TypeScriptGenerator:
             return "null"
         if type_ == "array":
             if isinstance(schema.get("prefixItems"), list):
-                items = ", ".join(self._ts(s, response) for s in schema["prefixItems"])
+                items = ", ".join(
+                    self._ts(s, response, strip_null=strip_null)
+                    for s in schema["prefixItems"]
+                )
                 return f"[{items}]"
-            return f"{_wrap(self._ts(schema.get('items'), response))}[]"
+            return f"{_wrap(self._ts(schema.get('items'), response, strip_null=strip_null))}[]"
         if (
             type_ == "object"
             or "properties" in schema
@@ -602,7 +642,9 @@ class TypeScriptGenerator:
                 schema = param.get("schema")
                 if schema is None and isinstance(param.get("content"), dict):
                     schema = next(iter(param["content"].values()), {}).get("schema")
-                ts = self._ts(schema)
+                # URL query/path strings cannot represent JSON null; strip it so optional Python
+                # parameters like `q: str | None = None` emit `q?: string` rather than `string | null`.
+                ts = self._ts(schema, strip_null=location in ("query", "path"))
                 if location == "path":
                     path_fields[name] = f"{_prop_name(name)}: {ts}"
                 elif location == "query":

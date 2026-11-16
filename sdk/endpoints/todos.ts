@@ -29,11 +29,11 @@ export interface TodosEndpoints {
     method: "GET";
     path: "/api/todos";
     params: void;
-    query: { done?: boolean | null; priority?: "low" | "normal" | "high" | null };
+    query: { done?: boolean; priority?: "low" | "normal" | "high" };
     body: void;
     response: TodoOut[];
     error: NinjaHttpError | NinjaValidationError;
-    request: { params?: never; query?: { done?: boolean | null; priority?: "low" | "normal" | "high" | null }; body?: never };
+    request: { params?: never; query?: { done?: boolean; priority?: "low" | "normal" | "high" }; body?: never };
   };
   /**
    * Get todo by ID

@@ -158,8 +158,8 @@ def test_deprecated_and_summary_jsdoc(sdk_text):
 
 def test_query_schema_is_flattened_and_optional(sdk, sdk_text):
     block = endpoint_block(sdk_text, "GET /api/todos")
-    assert "query: { limit?: number; q?: string | null };" in block
-    assert "query?: { limit?: number; q?: string | null }" in block
+    assert "query: { limit?: number; q?: string };" in block
+    assert "query?: { limit?: number; q?: string }" in block
     assert "response: TodoOut[];" in block
     assert "types/_shared.ts" not in sdk
     assert "TodoFilters" not in sdk_text
@@ -506,7 +506,7 @@ async function main(): Promise<void> {
       console.log("Per request error for", ctx.endpoint, err.message);
     },
   });
-  const filtered = await api.fetch("GET /api/todos", { query: { limit: 5 } });
+  const filtered = await api.fetch("GET /api/todos", { query: { limit: 5, q: "milk" } });
   const one = await api.fetch("GET /api/todos/{id}", { params: { id: "todo_1" } });
   const done: boolean = one.done;
   const created = await api.fetch("POST /api/todos", { body: { title: "Ship", priority: "high" } });
@@ -543,6 +543,8 @@ async function main(): Promise<void> {
   await api.fetch("GET /api/nope");
   // @ts-expect-error required query
   await api.fetch("GET /api/todos/search/required");
+  // @ts-expect-error nullable query param omits null
+  await api.fetch("GET /api/todos", { query: { q: null } });
   // @ts-expect-error endpoint takes no body
   await api.fetch("GET /api/health", { body: { x: 1 } });
 
@@ -1120,6 +1122,97 @@ def test_sync_and_check_sdk_lifecycle(tmp_path: Path):
     (unmanaged_dir / "index.ts").write_text("export const handWritten = true;\n")
     with pytest.raises(ValueError, match="unmanaged"):
         ninja_ts.sync_sdk(api, unmanaged_dir, import_ext="")
+
+
+def test_query_and_path_params_strip_null_while_body_preserves_null():
+    openapi = {
+        "openapi": "3.1.0",
+        "info": {"title": "NullableParams"},
+        "paths": {
+            "/items/{item_id}": {
+                "post": {
+                    "parameters": [
+                        {
+                            "name": "item_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": ["string", "null"]},
+                        },
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "string", "nullable": True},
+                        },
+                        {
+                            "name": "color",
+                            "in": "query",
+                            "required": False,
+                            "schema": {
+                                "anyOf": [
+                                    {"$ref": "#/components/schemas/Color"},
+                                    {"type": "null"},
+                                ]
+                            },
+                        },
+                        {
+                            "name": "tags",
+                            "in": "query",
+                            "required": False,
+                            "schema": {
+                                "anyOf": [
+                                    {
+                                        "type": "array",
+                                        "items": {
+                                            "anyOf": [
+                                                {"type": "string"},
+                                                {"type": "null"},
+                                            ]
+                                        },
+                                    },
+                                    {"type": "null"},
+                                ]
+                            },
+                        },
+                        {
+                            "name": "only_null",
+                            "in": "query",
+                            "required": False,
+                            "schema": {"type": "null"},
+                        },
+                    ],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/PatchItem"}
+                            }
+                        },
+                    },
+                    "responses": {"204": {"description": "No Content"}},
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Color": {"enum": ["red", "blue"]},
+                "PatchItem": {
+                    "type": "object",
+                    "properties": {
+                        "notes": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                    },
+                },
+            }
+        },
+    }
+    ts = "\n".join(TypeScriptGenerator(openapi).generate_sdk().values())
+    block = endpoint_block(ts, "POST /items/{item_id}")
+    assert "params: { item_id: string };" in block
+    assert (
+        "query: { color?: Color; only_null?: null; q?: string; tags?: string[] };"
+        in block
+    )
+    assert "  notes?: string | null;" in ts
 
 
 def test_management_command_check_and_guards(tmp_path: Path):

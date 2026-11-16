@@ -73,9 +73,10 @@ body refuse to compile without them.
 ## Optionality rules
 
 - **Inputs** follow Pydantic: a field is required unless it has a default.
+- **Query / path parameters** strip `| null` (`q?: string`), since URL strings ignore `null`.
 - **Outputs**: for schemas used only in responses, fields with a default are always serialized,
   so they're typed as present (`done: boolean`, not `done?: boolean`).
-- Nullable fields (`T | None`) become `T | null`.
+- Nullable JSON fields (`T | None`) become `T | null`.
 
 ## License
 
