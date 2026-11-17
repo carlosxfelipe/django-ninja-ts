@@ -42,6 +42,7 @@ export type {
   NinjaRetryConfig,
   NinjaValidationError,
   NinjaValidationErrorItem,
+  RequestArgs,
   RequestContext,
   RequestOptionsFor,
 } from "./runtime";

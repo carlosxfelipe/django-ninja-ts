@@ -21,6 +21,7 @@ EXPORTED_NAMES = (
     "NinjaValidationErrorItem",
     "NinjaValidationError",
     "RequestContext",
+    "RequestArgs",
     "RequestOptions",
     "RequestOptionsFor",
     "BaseRequestOptions",
@@ -141,6 +142,14 @@ export type RequestOptionsFor<
   K extends keyof Endpoints,
 > = Endpoints[K]["request"] & BaseRequestOptions;
 
+/** Options argument of client methods: optional when the endpoint has no required params, query or body. */
+export type RequestArgs<
+  Endpoints extends { [K in keyof Endpoints]: NinjaEndpointDef },
+  K extends keyof Endpoints,
+> = Record<never, never> extends Endpoints[K]["request"]
+  ? [options?: RequestOptionsFor<Endpoints, K>]
+  : [options: RequestOptionsFor<Endpoints, K>];
+
 export interface NinjaClientOptions {
   /** Static headers, or a (sync/async) callback evaluated on every request (e.g. JWT). */
   headers?: Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>);
@@ -191,15 +200,11 @@ export interface NinjaClientFor<
   readonly baseUrl: string;
   fetch<K extends keyof Endpoints & string>(
     endpoint: K,
-    ...args: Record<never, never> extends Endpoints[K]["request"]
-      ? [options?: RequestOptionsFor<Endpoints, K>]
-      : [options: RequestOptionsFor<Endpoints, K>]
+    ...args: RequestArgs<Endpoints, K>
   ): Promise<Endpoints[K]["response"]>;
   queryOptions<K extends keyof Endpoints & string>(
     endpoint: K,
-    ...args: Record<never, never> extends Endpoints[K]["request"]
-      ? [options?: RequestOptionsFor<Endpoints, K>]
-      : [options: RequestOptionsFor<Endpoints, K>]
+    ...args: RequestArgs<Endpoints, K>
   ): NinjaQueryOptions<K, Endpoints[K]["response"]>;
 }
 

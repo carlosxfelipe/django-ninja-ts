@@ -455,6 +455,8 @@ import {
   isNinjaApiError,
   parseNinjaError,
   DEFAULT_RETRY_METHODS,
+  type EndpointKey,
+  type NinjaEndpoints,
   type ResponseData,
   type ResponseError,
   type NextFetchRequestConfig,
@@ -463,6 +465,7 @@ import {
   type NinjaRetryConfig,
   type NinjaRequestInit,
   type NinjaRequestConfig,
+  type RequestArgs,
   type RequestContext,
   type NinjaValidationError,
 } from "./api";
@@ -541,6 +544,18 @@ async function main(): Promise<void> {
   const qList = await qOpts.queryFn();
   // @ts-expect-error queryOptions requires params when path param is present
   api.queryOptions("GET /api/todos/{id}");
+
+  function callApi<K extends EndpointKey>(
+    endpoint: K,
+    ...args: RequestArgs<NinjaEndpoints, K>
+  ): Promise<ResponseData<K>> {
+    return api.fetch(endpoint, ...args);
+  }
+  const wrappedList = await callApi("GET /api/todos");
+  const wrappedOne = await callApi("GET /api/todos/{id}", { params: { id: "todo_1" } });
+  // @ts-expect-error generic wrapper enforces required params
+  await callApi("GET /api/todos/{id}");
+  void [wrappedList, wrappedOne];
 
   // @ts-expect-error path params are required
   await api.fetch("GET /api/todos/{id}");

@@ -1205,6 +1205,7 @@ class TypeScriptGenerator:
             "  NinjaRetryConfig,\n"
             "  NinjaValidationError,\n"
             "  NinjaValidationErrorItem,\n"
+            "  RequestArgs,\n"
             "  RequestContext,\n"
             "  RequestOptionsFor,\n"
             f'}} from "./runtime{import_ext}";\n'
