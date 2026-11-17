@@ -48,23 +48,94 @@ _RESERVED_TYPE_NAMES = frozenset(
         "boolean",
         "symbol",
         "bigint",
+        "true",
+        "false",
+        "this",
+        "type",
+        "interface",
+        "class",
+        "enum",
+        "function",
+        "const",
+        "let",
+        "var",
+        "new",
+        "delete",
+        "default",
+        "export",
+        "import",
+        "extends",
+        "implements",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "static",
+        "yield",
+        "in",
+        "instanceof",
+        "typeof",
+        "return",
+        "super",
+        "switch",
+        "case",
+        "break",
+        "continue",
+        "do",
+        "else",
+        "for",
+        "if",
+        "while",
+        "with",
+        "try",
+        "catch",
+        "finally",
+        "throw",
+        "debugger",
         "Array",
         "Record",
         "Partial",
+        "Required",
+        "Readonly",
+        "Pick",
+        "Omit",
         "Promise",
         "Date",
+        "Error",
+        "Map",
+        "Set",
+        "Object",
+        "String",
+        "Number",
+        "Boolean",
+        "Symbol",
+        "JSON",
+        "Math",
+        "ArrayBuffer",
         "Blob",
         "File",
         "FormData",
         "Headers",
         "Response",
         "Request",
+        "RequestInit",
+        "RequestCache",
+        "RequestCredentials",
+        "BodyInit",
         "URLSearchParams",
         "ReadableStream",
-        "Error",
+        "AbortSignal",
+        "AbortController",
+        "TextDecoderStream",
+        "DOMException",
         *runtime.EXPORTED_NAMES,
     }
 )
+
+
+def _normalize_media_type(media_type: str) -> str:
+    return media_type.split(";", 1)[0].strip().lower()
+
 
 # Request body media types, in order of preference, mapped to the runtime body encoding.
 _BODY_MEDIA_TYPES = (
@@ -196,7 +267,9 @@ def detect_ts_import_extension(directory: Path | str) -> str:
             opts = tsconfig["compilerOptions"]
             mr = str(opts.get("moduleResolution") or "").strip().lower()
             module = str(opts.get("module") or "").strip().lower()
-            if opts.get("allowImportingTsExtensions") and opts.get("noEmit"):
+            if opts.get("allowImportingTsExtensions") or opts.get(
+                "rewriteRelativeImportExtensions"
+            ):
                 return ".ts"
             if mr in ("node16", "nodenext"):
                 return ".js"
@@ -768,19 +841,27 @@ class TypeScriptGenerator:
             return "void", False, "json"
         content: dict[str, Any] = body["content"]
         required = bool(body.get("required"))
+        normalized = [
+            (_normalize_media_type(mt), media) for mt, media in content.items()
+        ]
 
-        for media_type, encoding in _BODY_MEDIA_TYPES:
-            if media_type in content:
-                ts = self._ts((content[media_type] or {}).get("schema"))
-                if encoding == "multipart":
-                    ts = f"{_wrap(ts)} | FormData"
-                elif encoding == "form":
-                    ts = f"{_wrap(ts)} | URLSearchParams"
-                return ts, required, encoding
-        for media_type, media in content.items():
-            if media_type.endswith("+json"):
+        for target_mt, encoding in _BODY_MEDIA_TYPES:
+            for mt, media in normalized:
+                if mt == target_mt:
+                    ts = self._ts((media or {}).get("schema"))
+                    if encoding == "multipart":
+                        ts = f"{_wrap(ts)} | FormData"
+                    elif encoding == "form":
+                        ts = f"{_wrap(ts)} | URLSearchParams"
+                    return ts, required, encoding
+        for mt, media in normalized:
+            if mt.endswith("+json"):
                 return self._ts((media or {}).get("schema")), required, "json"
-        return "Blob | ArrayBuffer | string", required, "raw"
+        return (
+            "Blob | ArrayBuffer | ArrayBufferView | ReadableStream | string",
+            required,
+            "raw",
+        )
 
     def _content_ts(self, response: Any, *, response_schema: bool = True) -> str:
         if not isinstance(response, dict):
@@ -788,12 +869,15 @@ class TypeScriptGenerator:
         content = response.get("content") if isinstance(response, dict) else None
         if not isinstance(content, dict) or not content:
             return "unknown"
-        for media_type, media in content.items():
-            if media_type == "application/json" or media_type.endswith("+json"):
+        normalized = [
+            (_normalize_media_type(mt), media) for mt, media in content.items()
+        ]
+        for mt, media in normalized:
+            if mt == "application/json" or mt.endswith("+json"):
                 return self._ts((media or {}).get("schema"), response=response_schema)
-        if "text/event-stream" in content:
+        if any(mt == "text/event-stream" for mt, _ in normalized):
             return "ReadableStream<string>"
-        if any(mt.startswith("text/") for mt in content):
+        if any(mt.startswith("text/") or "xml" in mt for mt, _ in normalized):
             return "string"
         return "Blob"
 

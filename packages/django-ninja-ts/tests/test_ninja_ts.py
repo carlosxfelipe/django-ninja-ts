@@ -349,11 +349,11 @@ def test_ninja_api_error_headers_and_timeout_types(sdk):
 def test_retry_config_types_and_runtime(sdk):
     runtime_ts = sdk["runtime.ts"]
     assert "export interface NinjaRetryConfig {" in runtime_ts
-    assert "attempts: number;" in runtime_ts
+    assert "attempts?: number;" in runtime_ts
     assert "delayMs?: number;" in runtime_ts
     assert "statusCodes?: number[];" in runtime_ts
     assert "methods?: string[];" in runtime_ts
-    assert "retry?: number | NinjaRetryConfig;" in runtime_ts
+    assert "retry?: boolean | number | NinjaRetryConfig;" in runtime_ts
     assert (
         'export const DEFAULT_RETRY_METHODS: readonly string[] = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];'
         in runtime_ts
@@ -364,6 +364,7 @@ def test_retry_config_types_and_runtime(sdk):
         in runtime_ts
     )
     assert 'res.headers.get("Retry-After")' in runtime_ts
+    assert "/^\\d+$/.test(retryAfter)" in runtime_ts
     assert "Math.random()" in runtime_ts
     assert "0.5 + Math.random() * 0.5" in runtime_ts
     assert "Date.parse(retryAfter)" in runtime_ts
@@ -510,7 +511,9 @@ async function main(): Promise<void> {
       console.log("Per request error for", ctx.endpoint, err.message);
     },
   });
-  const filtered = await api.fetch("GET /api/todos", { query: { limit: 5, q: "milk" } });
+  const filtered = await api.fetch("GET /api/todos", { query: { limit: 5, q: "milk" }, retry: false });
+  const retriedBool = await api.fetch("GET /api/todos", { retry: true });
+  const retriedPartial = await api.fetch("GET /api/todos", { retry: { delayMs: 100 } });
   const one = await api.fetch("GET /api/todos/{id}", { params: { id: "todo_1" } });
   const done: boolean = one.done;
   const created = await api.fetch("POST /api/todos", { body: { title: "Ship", priority: "high" } });
@@ -566,7 +569,7 @@ async function main(): Promise<void> {
       console.log(err.status, statusText, errData, contentType);
     }
   }
-  console.log(list, qList, filtered, done, created, removed, file1, file2);
+  console.log(list, qList, filtered, retriedBool, retriedPartial, done, created, removed, file1, file2);
 }
 
 void main();
@@ -1336,3 +1339,316 @@ def test_management_command_check_and_guards(tmp_path: Path):
         call_command("generate_ts_sdk", out=str(tmp_path / "api.ts"))
     with pytest.raises(CommandError, match="requires -o/--out"):
         call_command("generate_ts_sdk", check=True)
+
+
+def test_media_types_reserved_names_and_emit_declaration_only(tmp_path: Path):
+    openapi = {
+        "openapi": "3.1.0",
+        "info": {"title": "MediaAndReserved"},
+        "paths": {
+            "/upper-json": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "Application/JSON; charset=utf-8": {
+                                "schema": {"$ref": "#/components/schemas/Map"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "Application/JSON; charset=utf-8": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/RequestInit"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+            "/xml": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "Application/XML; charset=utf-8": {
+                                    "schema": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/binary-upload": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/octet-stream": {
+                                "schema": {"type": "string", "format": "binary"}
+                            }
+                        },
+                    },
+                    "responses": {"204": {"description": "No Content"}},
+                }
+            },
+        },
+        "components": {
+            "schemas": {
+                "Map": {
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}},
+                    "required": ["key"],
+                },
+                "RequestInit": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            }
+        },
+    }
+    files = TypeScriptGenerator(openapi).generate_sdk()
+    ts = "\n".join(files.values())
+    assert "export interface Map_2 {" in ts
+    assert "export interface RequestInit_2 {" in ts
+    upper_block = endpoint_block(ts, "POST /upper-json")
+    assert "body: Map_2;" in upper_block
+    assert "response: RequestInit_2;" in upper_block
+    xml_block = endpoint_block(ts, "GET /xml")
+    assert "response: string;" in xml_block
+    raw_block = endpoint_block(ts, "POST /binary-upload")
+    assert (
+        "body: Blob | ArrayBuffer | ArrayBufferView | ReadableStream | string;"
+        in raw_block
+    )
+    assert '  "POST /binary-upload": "raw",\n' in files["index.ts"]
+
+    emit_decl = tmp_path / "decl_only" / "sdk"
+    emit_decl.mkdir(parents=True)
+    (tmp_path / "decl_only" / "tsconfig.json").write_text(
+        '{"compilerOptions": {"emitDeclarationOnly": true, "allowImportingTsExtensions": true}}'
+    )
+    assert detect_ts_import_extension(emit_decl) == ".ts"
+
+
+@pytest.mark.skipif(not node_path, reason="Node.js not on PATH")
+def test_runtime_retry_variants_content_type_and_parse_error_hooks(tmp_path: Path):
+    assert node_path is not None
+    openapi = {
+        "openapi": "3.1.0",
+        "info": {"title": "ParityAPI"},
+        "paths": {
+            "/form": {
+                "post": {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/x-www-form-urlencoded": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"username": {"type": "string"}},
+                                    "required": ["username"],
+                                }
+                            }
+                        },
+                    },
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"ok": {"type": "boolean"}},
+                                        "required": ["ok"],
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+            "/files/{path:filepath}": {
+                "get": {
+                    "parameters": [
+                        {
+                            "name": "filepath",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "Application/JSON; charset=utf-8": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"path": {"type": "string"}},
+                                        "required": ["path"],
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+            "/items": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {"schema": {"type": "string"}}
+                            }
+                        }
+                    }
+                }
+            },
+        },
+    }
+    ninja_ts.export_sdk(openapi, tmp_path / "sdk", import_ext=".ts")
+    runner = """
+import assert from "node:assert/strict";
+import { createNinjaClient } from "./sdk/index.ts";
+
+let retryBoolCalls = 0;
+let retryObjCalls = 0;
+let retryPastIsoCalls = 0;
+let retryFalseCalls = 0;
+let onErrorCalls = 0;
+
+const client = createNinjaClient("https://example.test", {
+  headers: { "Content-Type": "application/json" },
+  retry: 2,
+  onError() {
+    onErrorCalls++;
+  },
+  async fetch(url, init) {
+    const mode = init.headers.get("X-Mode");
+    if (url.endsWith("/form")) {
+      assert.equal(init.headers.get("Content-Type"), null);
+      assert.ok(init.body instanceof URLSearchParams);
+      assert.equal(init.body.get("username"), "alice");
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "Application/JSON; charset=utf-8" },
+      });
+    }
+    if (url.includes("/files/")) {
+      return new Response(JSON.stringify({ path: url }), {
+        status: 200,
+        headers: { "content-type": "Application/JSON; charset=utf-8" },
+      });
+    }
+    if (mode === "bad-json") {
+      return new Response("{broken", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (mode === "retry-bool") {
+      retryBoolCalls++;
+      if (retryBoolCalls < 3) {
+        return new Response("busy", { status: 503 });
+      }
+      return new Response(JSON.stringify("ok-bool"), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (mode === "retry-obj") {
+      retryObjCalls++;
+      if (retryObjCalls < 3) {
+        return new Response("busy", { status: 503 });
+      }
+      return new Response(JSON.stringify("ok-obj"), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (mode === "retry-past-iso") {
+      retryPastIsoCalls++;
+      if (retryPastIsoCalls === 1) {
+        return new Response("busy", {
+          status: 503,
+          headers: { "Retry-After": "2020-01-01T00:00:00Z" },
+        });
+      }
+      return new Response(JSON.stringify("ok-iso"), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (mode === "retry-false") {
+      retryFalseCalls++;
+      return new Response(JSON.stringify({ detail: "fail" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error("unexpected request: " + url);
+  },
+});
+
+// 1. Default JSON Content-Type does not break form-urlencoded, and uppercase JSON Content-Type parses
+const formRes = await client.fetch("POST /form", { body: { username: "alice" } });
+assert.equal(formRes.ok, true);
+
+// 2. {path:filepath} catch-all path param resolves cleanly
+const fileRes = await client.fetch("GET /files/{path:filepath}", {
+  params: { filepath: ["docs", "api guide.md"] },
+});
+assert.equal(fileRes.path, "https://example.test/files/docs/api%20guide.md");
+
+// 3. Parse error in readBody triggers onError hook
+const prevErrors = onErrorCalls;
+await assert.rejects(
+  () => client.fetch("GET /items", { headers: { "X-Mode": "bad-json" }, retry: false }),
+  (err) => err instanceof SyntaxError,
+);
+assert.equal(onErrorCalls, prevErrors + 1);
+
+// 4. retry: false disables client-level retry
+await assert.rejects(
+  () => client.fetch("GET /items", { headers: { "X-Mode": "retry-false" }, retry: false }),
+);
+assert.equal(retryFalseCalls, 1);
+
+// 5. retry: true and retry: { delayMs } default to 2 retry attempts (3 total calls)
+const boolClient = createNinjaClient("https://example.test", {
+  fetch: async (url, init) => {
+    retryBoolCalls++;
+    if (retryBoolCalls < 3) return new Response("busy", { status: 503 });
+    return new Response(JSON.stringify("ok-bool"), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+});
+retryBoolCalls = 0;
+assert.equal(await boolClient.fetch("GET /items", { retry: true }), "ok-bool");
+assert.equal(retryBoolCalls, 3);
+
+assert.equal(await client.fetch("GET /items", { headers: { "X-Mode": "retry-obj" }, retry: { delayMs: 1 } }), "ok-obj");
+assert.equal(retryObjCalls, 3);
+
+// 6. Retry-After ISO date in the past is not parsed as 2020 seconds
+const started = Date.now();
+assert.equal(
+  await client.fetch("GET /items", { headers: { "X-Mode": "retry-past-iso" }, retry: { attempts: 1, delayMs: 1 } }),
+  "ok-iso",
+);
+assert.ok(Date.now() - started < 1000);
+"""
+    (tmp_path / "runner.mts").write_text(runner)
+    result = subprocess.run(
+        [node_path, "--experimental-strip-types", "runner.mts"],
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

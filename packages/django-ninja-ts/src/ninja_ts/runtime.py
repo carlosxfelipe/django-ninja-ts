@@ -76,8 +76,8 @@ export interface NextFetchRequestConfig {
 }
 
 export interface NinjaRetryConfig {
-  /** Maximum number of retry attempts (in addition to the initial request). */
-  attempts: number;
+  /** Maximum number of retry attempts in addition to the initial request (default: 2). */
+  attempts?: number;
   /** Base delay in milliseconds before the first retry (default: 300ms). */
   delayMs?: number;
   /** HTTP status codes that trigger a retry (default: [408, 429, 500, 502, 503, 504]). */
@@ -102,12 +102,16 @@ export interface NinjaRequestConfig {
 export interface BaseRequestOptions {
   headers?: Record<string, string>;
   credentials?: RequestCredentials;
+  /**
+   * Cancels the request (e.g. from an AbortController in a React effect cleanup).
+   * Cancellations requested through this signal are not reported to onError hooks.
+   */
   signal?: AbortSignal;
   cache?: RequestCache;
   next?: NextFetchRequestConfig;
   duplex?: "half";
   timeoutMs?: number;
-  retry?: number | NinjaRetryConfig;
+  retry?: boolean | number | NinjaRetryConfig;
   /** Hook invoked before this request is sent. Can mutate `config.init` (e.g. inject headers) or perform logging. */
   onRequest?: (config: NinjaRequestConfig) => Promise<void> | void;
   /** Hook invoked after a response is received for this request. */
@@ -150,7 +154,7 @@ export interface NinjaClientOptions {
   /** Default request timeout in milliseconds. */
   timeoutMs?: number;
   /** Default retry policy for failed requests (network errors or retryable status codes). */
-  retry?: number | NinjaRetryConfig;
+  retry?: boolean | number | NinjaRetryConfig;
   /** Hook invoked before each request is sent. Can mutate `config.init` (e.g. inject headers) or perform logging. */
   onRequest?: (config: NinjaRequestConfig) => Promise<void> | void;
   /** Hook invoked after a response is received, before error handling or body parsing. */
@@ -185,7 +189,7 @@ export interface NinjaClientFor<
   Endpoints extends { [K in keyof Endpoints]: NinjaEndpointDef },
 > {
   readonly baseUrl: string;
-  fetch<K extends keyof Endpoints>(
+  fetch<K extends keyof Endpoints & string>(
     endpoint: K,
     ...args: Record<never, never> extends Endpoints[K]["request"]
       ? [options?: RequestOptionsFor<Endpoints, K>]
@@ -234,6 +238,8 @@ export type NinjaClient = NinjaClientFor<NinjaEndpoints>;
 """
 
 _SHARED_RUNTIME_HELPERS = r"""
+const DEFAULT_RETRY_ATTEMPTS = 2;
+const DEFAULT_RETRY_STATUSES = [408, 429, 500, 502, 503, 504];
 export const DEFAULT_RETRY_METHODS: readonly string[] = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
 
 /** Errors thrown by fetch itself (connection refused, DNS failure, CORS...). */
@@ -504,30 +510,34 @@ function combineSignals(signalA?: AbortSignal, signalB?: AbortSignal): AbortSign
   return controller.signal;
 }
 
+function formatValidationErrors(items: unknown[]): string {
+  const parts = items.map((item) => {
+    if (typeof item === "string") return item;
+    if (item && typeof item === "object") {
+      const e = item as Record<string, unknown>;
+      const loc = issueField(e);
+      const msg = issueMessage(e);
+      if (loc && msg) return `${loc}: ${msg}`;
+      if (msg) return msg;
+    }
+    return JSON.stringify(item);
+  });
+  return `Validation error: ${parts.join("; ")}`;
+}
+
 function errorMessage(data: unknown, fallback: string): string {
-  if (typeof data === "string" && data) return data;
+  if (typeof data === "string" && data.trim()) return data.trim();
   if (data && typeof data === "object") {
     const record = data as Record<string, unknown>;
     if (typeof record["detail"] === "string" && record["detail"]) return record["detail"];
-    if (Array.isArray(record["detail"])) {
-      const messages = record["detail"]
-        .map((item) => {
-          if (item && typeof item === "object") {
-            const err = item as Record<string, unknown>;
-            const loc = Array.isArray(err["loc"]) ? err["loc"].join(".") : "";
-            const msg = typeof err["msg"] === "string" ? err["msg"] : "";
-            return loc && msg ? `${loc}: ${msg}` : msg || JSON.stringify(item);
-          }
-          return String(item);
-        })
-        .filter(Boolean);
-      return messages.length > 0 ? `Validation error: ${messages.join("; ")}` : "Validation error";
+    if (Array.isArray(record["detail"]) && record["detail"].length > 0) {
+      return formatValidationErrors(record["detail"]);
     }
     if (typeof record["message"] === "string" && record["message"]) return record["message"];
     if (typeof record["error"] === "string" && record["error"]) return record["error"];
     if (typeof record["title"] === "string" && record["title"]) return record["title"];
-    if (Array.isArray(record["errors"])) {
-      return `Errors: ${record["errors"].map((e) => (typeof e === "string" ? e : JSON.stringify(e))).join("; ")}`;
+    if (Array.isArray(record["errors"]) && record["errors"].length > 0) {
+      return formatValidationErrors(record["errors"]);
     }
   }
   return fallback;
@@ -539,7 +549,7 @@ async function readBody(response: Response): Promise<unknown> {
   if (response.status === 204 || response.status === 205 || response.headers.get("content-length") === "0") {
     return undefined;
   }
-  const contentType = response.headers.get("content-type") ?? "";
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
   if (contentType.includes("application/json") || contentType.includes("+json")) {
     if (typeof response.text === "function") {
       const text = await response.text();
@@ -566,7 +576,7 @@ async function readBody(response: Response): Promise<unknown> {
 }
 
 async function readErrorBody(response: Response): Promise<unknown> {
-  const contentType = response.headers.get("content-type") ?? "";
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
   const fallback = { message: response.statusText || `HTTP ${response.status}` };
   try {
     if (typeof response.text === "function") {
@@ -598,10 +608,11 @@ async function readErrorBody(response: Response): Promise<unknown> {
 }
 
 function retryDelay(attempt: number, baseDelay: number, res?: Response): number {
-  const retryAfter = res ? res.headers.get("Retry-After") : null;
+  const retryAfter = res ? res.headers.get("Retry-After")?.trim() : undefined;
   if (retryAfter) {
-    const seconds = parseInt(retryAfter, 10);
-    if (!isNaN(seconds)) return Math.max(0, seconds * 1000);
+    if (/^\d+$/.test(retryAfter)) {
+      return Math.max(0, Number(retryAfter) * 1000);
+    }
     const dateMs = Date.parse(retryAfter);
     if (!isNaN(dateMs)) return Math.max(0, dateMs - Date.now());
   }
@@ -623,22 +634,26 @@ function sleep(ms: number, signal: AbortSignal | null | undefined): Promise<void
       signal?.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
-    if (
-      typeof timer === "object" &&
-      timer &&
-      "unref" in timer &&
-      typeof (timer as { unref: () => void }).unref === "function"
-    ) {
-      (timer as { unref: () => void }).unref();
-    }
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
 function resolvePath(endpoint: string, template: string, params: Record<string, unknown>): string {
   return template.replace(/\{([^}]+)\}/g, (_match, rawName: string) => {
-    const isCatchAll = rawName.startsWith("+") || rawName.endsWith("*");
-    const name = rawName.replace(/^\+/, "").replace(/\*$/, "");
+    let isCatchAll = rawName.startsWith("+") || rawName.endsWith("*");
+    let name = rawName.replace(/^\+/, "").replace(/\*$/, "");
+    if (name.startsWith("path:")) {
+      name = name.slice(5);
+      isCatchAll = true;
+    } else if (name.endsWith(":path")) {
+      name = name.slice(0, -5);
+      isCatchAll = true;
+    } else {
+      const colonIdx = name.indexOf(":");
+      if (colonIdx >= 0) {
+        name = name.slice(0, colonIdx);
+      }
+    }
     const value = params[name] ?? (name !== rawName ? params[rawName] : undefined);
     if (value === undefined || value === null) {
       throw new Error(`Missing path parameter "${name}" for ${endpoint}`);
@@ -660,34 +675,48 @@ function encodeBody(
   headers: Headers,
   bodyEncodings: BodyEncodingMap,
 ): BodyInit {
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    headers.delete("Content-Type"); // let fetch set the multipart boundary
+    return body;
+  }
+  const contentType = (headers.get("Content-Type") ?? "").toLowerCase();
+  if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
+    if (contentType.includes("json")) headers.delete("Content-Type");
+    return body;
+  }
+  if (isBodyInit(body)) {
+    return body;
+  }
   let encoding = bodyEncodings[endpoint] ?? "json";
   if (encoding === "json" && hasBlobValue(body)) {
     encoding = "multipart";
   }
-
-  if (isBodyInit(body)) {
-    if (typeof FormData !== "undefined" && body instanceof FormData) {
-      headers.delete("Content-Type");
+  if (body !== null && typeof body === "object") {
+    if (encoding === "multipart" || contentType.includes("multipart/form-data")) {
+      const form = new FormData();
+      for (const [key, value] of toEntries(body)) form.append(key, value);
+      headers.delete("Content-Type"); // let fetch set the multipart boundary
+      return form;
     }
+    if (encoding === "form" || contentType.includes("application/x-www-form-urlencoded")) {
+      if (contentType.includes("json")) headers.delete("Content-Type");
+      const form = new URLSearchParams();
+      for (const [key, value] of toEntries(body)) {
+        if (typeof value === "string") form.append(key, value);
+      }
+      return form;
+    }
+  }
+  if (
+    typeof body === "string" &&
+    (encoding === "raw" || (contentType !== "" && !contentType.includes("json")))
+  ) {
     return body;
   }
   if (encoding === "raw") {
-    return typeof body === "string" || isBodyInit(body) ? (body as BodyInit) : String(body);
+    return String(body);
   }
-  if (encoding === "multipart") {
-    const form = new FormData();
-    for (const [key, value] of toEntries(body)) form.append(key, value);
-    headers.delete("Content-Type");
-    return form;
-  }
-  if (encoding === "form") {
-    const form = new URLSearchParams();
-    for (const [key, value] of toEntries(body)) {
-      if (typeof value === "string") form.append(key, value);
-    }
-    return form;
-  }
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (!contentType) headers.set("Content-Type", "application/json");
   return JSON.stringify(body);
 }
 """
@@ -699,7 +728,7 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
     const method = endpoint.slice(0, separator);
     const path = resolvePath(endpoint, endpoint.slice(separator + 1), options.params ?? {});
 
-    let url = root + path;
+    let url = root + (path.startsWith("/") ? path : "/" + path);
     if (options.query) {
       const search = new URLSearchParams();
       for (const [key, value] of Object.entries(options.query)) {
@@ -779,14 +808,17 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
     const retryOpt = options.retry ?? clientOptions.retry;
     let maxAttempts = 1;
     let baseDelay = 300;
-    let retryStatuses = [408, 429, 500, 502, 503, 504];
+    let retryStatuses = DEFAULT_RETRY_STATUSES;
     let retryMethods = DEFAULT_RETRY_METHODS;
 
-    if (typeof retryOpt === "number" && retryOpt > 0) {
+    if (retryOpt === true) {
+      maxAttempts = 1 + DEFAULT_RETRY_ATTEMPTS;
+    } else if (typeof retryOpt === "number" && retryOpt > 0) {
       maxAttempts = 1 + retryOpt;
     } else if (typeof retryOpt === "object" && retryOpt !== null) {
-      if (typeof retryOpt.attempts === "number" && retryOpt.attempts > 0) {
-        maxAttempts = 1 + retryOpt.attempts;
+      const attempts = retryOpt.attempts ?? DEFAULT_RETRY_ATTEMPTS;
+      if (attempts > 0) {
+        maxAttempts = 1 + attempts;
       }
       if (typeof retryOpt.delayMs === "number" && retryOpt.delayMs >= 0) {
         baseDelay = retryOpt.delayMs;
@@ -839,15 +871,15 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
         try {
           shouldRetry = await clientOptions.onUnauthorized(context);
         } catch (refreshError) {
-          response.body?.cancel().catch(() => undefined);
+          Promise.resolve(response.body?.cancel?.()).catch(() => undefined);
           return fail(refreshError);
         }
         if (init.signal?.aborted) {
-          response.body?.cancel().catch(() => undefined);
+          Promise.resolve(response.body?.cancel?.()).catch(() => undefined);
           return fail(init.signal.reason);
         }
         if (shouldRetry) {
-          response.body?.cancel().catch(() => undefined);
+          Promise.resolve(response.body?.cancel?.()).catch(() => undefined);
           const freshHeaders = await buildHeaders();
           init.headers = freshHeaders;
           if (options.body !== undefined) {
@@ -864,7 +896,7 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
         !init.signal?.aborted
       ) {
         attempt++;
-        response.body?.cancel().catch(() => undefined);
+        Promise.resolve(response.body?.cancel?.()).catch(() => undefined);
         try {
           await sleep(retryDelay(attempt, baseDelay, response), init.signal);
         } catch (abortErr) {
@@ -892,7 +924,11 @@ _CLIENT_FACTORY_BODY = r"""  const root = baseUrl.replace(/\/+$/, "");
       );
       return fail(apiError);
     }
-    return readBody(response);
+    try {
+      return await readBody(response);
+    } catch (bodyErr) {
+      return fail(bodyErr);
+    }
   }
 """
 
